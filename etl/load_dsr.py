@@ -1,0 +1,730 @@
+"""
+Load a DSR workbook into the `dsr` schema.
+
+    python -m etl.load_dsr                      # loads ./DSR August 2026.xlsx
+    python -m etl.load_dsr --file other.xlsx
+    python -m etl.load_dsr --period SEP2026 --start 2026-09-01 --end 2026-09-30
+
+The load is idempotent: every table in `dsr` is emptied and rebuilt from the
+workbook, so re-running after the sheet is updated is the normal way to refresh.
+Reference tables (consultants, models, variants, colours, sources) are discovered
+from the data rather than hard-coded, so a new trim or a new joiner appears
+automatically.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from datetime import date, datetime
+from pathlib import Path
+
+import openpyxl
+import psycopg
+
+from . import dimensions as dims
+from . import normalize as nz
+
+DEFAULT_DSN = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres:postgres@127.0.0.1:5432/elite_dsr",
+)
+DEFAULT_FILE = Path(__file__).resolve().parent.parent / "DSR August 2026.xlsx"
+
+# Facts rebuilt from the workbook, in dependency order so the foreign keys never
+# block a reload. Only WORKBOOK-origin rows are cleared - see reset().
+WORKBOOK_FACTS = ["registration", "allotment", "booking", "test_drive", "lead"]
+
+# Targets belong wholly to the workbook for the period being loaded, so these are
+# cleared by period rather than by origin.
+PERIOD_TARGETS = [
+    "target_daily_tracker", "target_booking_commitment",
+    "target_channel_funnel", "target_consultant_scorecard",
+]
+
+# Dimensions are never cleared. They are upserted, so re-running is harmless, and
+# keeping the rows keeps their surrogate ids stable for anything already
+# referencing them. `vehicle` is treated the same way: it upserts on chassis
+# number, which is the real identity of the car, so a reload updates the unit in
+# place instead of giving it a new id.
+
+
+class Loader:
+    def __init__(self, conn: psycopg.Connection, wb, period_label: str,
+                 period_start: date, period_end: date):
+        self.cx = conn
+        self.wb = wb
+        self.period_label = period_label
+        self.period_start = period_start
+        self.period_end = period_end
+        self.counts: dict[str, int] = {}
+        self.warnings: list[str] = []
+
+        # caches: canonical key -> surrogate id
+        self.teams: dict[str, int] = {}
+        self.consultants: dict[str, int] = {}
+        self.models: dict[str, int] = {}
+        self.variants: dict[tuple[int, str], int] = {}
+        self.colours: dict[str, int] = {}
+        self.sources: dict[str, int] = {}
+        self.period_id: int | None = None
+        self.vehicle_by_chassis: dict[str, int] = {}
+
+    # -- small helpers ------------------------------------------------
+
+    def rows(self, sheet: str, header_row: int, key_col: int):
+        """
+        Yield (row_number, cell_getter) for rows that carry real data.
+
+        Several tabs are pre-numbered far past their content (Reg Report runs its
+        No column to 100 but only ~21 rows are filled), so a row only counts when
+        its key column is populated.
+        """
+        ws = self.wb[sheet]
+        for r in range(header_row + 1, ws.max_row + 1):
+            if nz.clean(ws.cell(r, key_col).value) is None:
+                continue
+            yield r, (lambda c, _r=r, _ws=ws: _ws.cell(_r, c).value)
+
+    def one(self, sql: str, params=()) -> int:
+        return self.cx.execute(sql, params).fetchone()[0]
+
+    # -- reference data ----------------------------------------------
+
+    # -- reference data ----------------------------------------------
+    #
+    # These wrap etl/dimensions.py, which the write API also uses, so a
+    # consultant typed into the dashboard resolves to the same row the loader
+    # would have created. The only thing added here is a per-run cache: the
+    # loader resolves the same handful of names across thousands of rows.
+
+    def _cached(self, cache: dict, key, resolve):
+        if key not in cache:
+            cache[key] = resolve()
+        return cache[key]
+
+    def team_id(self, label) -> int | None:
+        key = nz.team_key(label)
+        if not key:
+            return None
+        return self._cached(self.teams, key, lambda: dims.resolve_team(self.cx, label))
+
+    def consultant_id(self, label, team=None, channel=None) -> int | None:
+        key = nz.consultant_key(label)
+        if not key:
+            return None
+        # Cache only the lookup; team and channel still get applied every call,
+        # because different tabs carry different pieces of the same person.
+        cid = self._cached(self.consultants, key,
+                           lambda: dims.resolve_consultant(self.cx, label))
+        if team is not None or channel is not None:
+            dims.resolve_consultant(self.cx, label, team=team, channel=channel)
+        return cid
+
+    def model_id(self, label) -> int | None:
+        key = nz.model_key(label)
+        if not key:
+            return None
+        return self._cached(self.models, key, lambda: dims.resolve_model(self.cx, label))
+
+    def variant_id(self, model_label, variant_label,
+                   long_text=None, model_code=None) -> int | None:
+        mid = self.model_id(model_label)
+        vkey = nz.variant_key(variant_label)
+        if not mid or not vkey:
+            return None
+        vid = self._cached(
+            self.variants, (mid, vkey),
+            lambda: dims.resolve_variant(self.cx, model_label, variant_label,
+                                         long_text, model_code))
+        # The booking tabs name the trim but not the factory text; the stock tabs
+        # carry both. Backfill whichever arrives second.
+        if long_text or model_code:
+            self.cx.execute(
+                "UPDATE dim_variant SET long_model_text = COALESCE(long_model_text, %s), "
+                "model_code = COALESCE(model_code, %s) WHERE variant_id = %s",
+                (nz.clean(long_text), nz.upper(model_code), vid))
+        return vid
+
+    def colour_id(self, label, code=None) -> int | None:
+        key = nz.colour_key(label)
+        if not key:
+            return None
+        return self._cached(self.colours, key,
+                            lambda: dims.resolve_colour(self.cx, label, code))
+
+    def source_id(self, label) -> int | None:
+        resolved = nz.source_key(label)
+        if not resolved:
+            return None
+        return self._cached(self.sources, resolved[0],
+                            lambda: dims.resolve_source(self.cx, label))
+
+    # =================================================================
+    # Load steps
+    # =================================================================
+
+    def load_period(self):
+        self.period_id = self.one(
+            "INSERT INTO dim_period (label, period_start, period_end) VALUES (%s, %s, %s) "
+            "ON CONFLICT (label) DO UPDATE SET period_start = EXCLUDED.period_start, "
+            "                                 period_end = EXCLUDED.period_end "
+            "RETURNING period_id",
+            (self.period_label, self.period_start, self.period_end))
+        # Loading a workbook is a statement about which month matters, so the
+        # dashboard follows it. Cleared first: only one period may be active.
+        self.cx.execute("UPDATE dim_period SET is_active = false WHERE is_active")
+        self.cx.execute("UPDATE dim_period SET is_active = true WHERE period_id = %s",
+                        (self.period_id,))
+
+    def load_teams_and_channels(self):
+        """
+        Derive each consultant's team and primary channel from the data.
+
+        Team comes from the TEAM column on Booking & Alloted; primary channel from
+        the LEAD TYPE column on SC Performance. Both are read before the fact tables
+        so consultant rows are complete by the time bookings reference them.
+        """
+        for _, cell in self.rows("Booking & Alloted", 1, 11):
+            self.consultant_id(cell(12), team=cell(13))
+
+        ws = self.wb["SC Performance"]
+        for r in range(5, ws.max_row + 1):
+            name, lead_type = cell_of(ws, r, 2), nz.upper(ws.cell(r, 3).value)
+            if not nz.consultant_key(name) or not lead_type:
+                continue
+            channel = {"WALKIN": "WALKIN", "TELE": "TELE"}.get(lead_type)
+            if channel:
+                self.consultant_id(name, channel=channel)
+
+        # Anyone appearing in the August book is currently on the floor; the rest
+        # (2024-era staff reachable only through the historical lead dump) stay inactive.
+        self.cx.execute("""
+            UPDATE dim_consultant SET is_active = true
+            WHERE consultant_id IN (
+                SELECT consultant_id FROM booking WHERE consultant_id IS NOT NULL
+                UNION SELECT consultant_id FROM dim_consultant WHERE primary_channel IS NOT NULL
+            )""")
+
+    def load_vehicles(self):
+        """
+        Stock & Allotted is the live inventory; Reg Report adds units that have
+        already left stock. Both key on chassis number, so the second pass upserts.
+        """
+        inserted = 0
+        for sheet, header, cols in (
+            ("Stock & Allotted", 1, dict(chassis=3, comm=2, engine=4, model_code=5,
+                                         long=6, variant=7, my=9, obd=10, options=11,
+                                         colour_code=12, colour=13, model=14,
+                                         billing=15, received=16, aging=17,
+                                         status=18, nadcon=24)),
+            ("Reg Report", 2, dict(chassis=3, comm=2, engine=4, model_code=5,
+                                   long=6, variant=7, my=9, obd=10, options=10,
+                                   colour_code=11, colour=12, model=13,
+                                   billing=14, received=15, aging=16,
+                                   status=17, nadcon=23)),
+        ):
+            for _, cell in self.rows(sheet, header, cols["chassis"]):
+                chassis = nz.upper(cell(cols["chassis"]))
+                model_label = cell(cols["model"])
+                vid = self.variant_id(model_label, cell(cols["variant"]),
+                                      long_text=cell(cols["long"]),
+                                      model_code=cell(cols["model_code"]))
+                row = (
+                    chassis,
+                    nz.clean(cell(cols["comm"])),
+                    nz.upper(cell(cols["engine"])),
+                    self.model_id(model_label),
+                    vid,
+                    self.colour_id(cell(cols["colour"]), cell(cols["colour_code"])),
+                    nz.upper(cell(cols["model_code"])),
+                    nz.clean(cell(cols["long"])),
+                    nz.as_int(cell(cols["my"])),
+                    nz.upper(cell(cols["obd"])),
+                    nz.clean(cell(cols["options"])),
+                    nz.as_date(cell(cols["billing"])),
+                    nz.as_date(cell(cols["received"])),
+                    nz.as_int(cell(cols["aging"])),
+                    nz.stock_status(cell(cols["status"])) or "FREESTOCK",
+                    nz.as_date(cell(cols["nadcon"])),
+                )
+                self.cx.execute("""
+                    INSERT INTO vehicle (chassis_number, commission_no, engine_number,
+                        model_id, variant_id, colour_id, model_code, long_model_text,
+                        model_year, obd, options, billing_date, stock_received_date,
+                        stock_aging_days, stock_status, nadcon_retail_date)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (chassis_number) DO UPDATE SET
+                        -- Reg Report is the later snapshot for units it mentions,
+                        -- so its status wins; everything else is only backfilled.
+                        stock_status = EXCLUDED.stock_status,
+                        commission_no = COALESCE(vehicle.commission_no, EXCLUDED.commission_no),
+                        engine_number = COALESCE(vehicle.engine_number, EXCLUDED.engine_number),
+                        colour_id = COALESCE(vehicle.colour_id, EXCLUDED.colour_id),
+                        variant_id = COALESCE(vehicle.variant_id, EXCLUDED.variant_id),
+                        nadcon_retail_date = COALESCE(vehicle.nadcon_retail_date, EXCLUDED.nadcon_retail_date)
+                    """, row)
+                inserted += 1
+        for chassis, vid in self.cx.execute(
+                "SELECT chassis_number, vehicle_id FROM vehicle").fetchall():
+            self.vehicle_by_chassis[chassis] = vid
+        self.counts["vehicle"] = self.one("SELECT count(*) FROM vehicle")
+
+    def load_leads(self):
+        """
+        The Leads tab is the August enquiry book (thin - the CRM export only filled
+        date, name, source and model of interest). TD Leads is a full 2024 dump kept
+        for year-on-year comparison and flagged is_current_period = false.
+        """
+        for sheet, current in (("Leads", True), ("TD Leads", False)):
+            key_col = 5 if sheet == "Leads" else 2
+            for _, cell in self.rows(sheet, 1, key_col):
+                created = nz.as_datetime(cell(2))
+                self.cx.execute("""
+                    INSERT INTO lead (lead_record_id, created_at, lead_name, mobile, email,
+                        source_id, lead_type, model_of_interest, variant_of_interest,
+                        colour_of_interest, model_id, lead_owner, consultant_id,
+                        lead_status, rating, qualified_stage, test_drive_given,
+                        trade_in, trade_in_vehicle, dealership, period_id, is_current_period)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                    nz.clean(cell(1)), created, nz.clean(cell(5)), nz.mobile(cell(7)),
+                    nz.clean(cell(8)), self.source_id(cell(9)), nz.clean(cell(6)),
+                    nz.clean(cell(10)), nz.clean(cell(11)), nz.clean(cell(14)),
+                    self.model_id(nz.model_from_text(cell(10))),
+                    nz.clean(cell(15)), self.consultant_id(cell(15)),
+                    nz.clean(cell(16)), nz.clean(cell(17)), nz.clean(cell(35)),
+                    nz.as_bool(cell(25)), nz.as_bool(cell(26)), nz.clean(cell(28)),
+                    nz.clean(cell(4)), self.period_id if current else None, current,
+                ))
+        self.counts["lead"] = self.one("SELECT count(*) FROM lead")
+
+    def load_test_drives(self):
+        for _, cell in self.rows("TD", 1, 8):
+            self.cx.execute("""
+                INSERT INTO test_drive (test_drive_number, lead_record_id, lead_name,
+                    mobile, email, source_id, stage, model_of_interest, model_id,
+                    model_code, start_km, end_km, total_distance_km, td_date, status,
+                    created_at, outlet, consultant_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (test_drive_number) DO NOTHING
+                """, (
+                nz.upper(cell(8)), nz.clean(cell(16)), nz.clean(cell(1)),
+                nz.mobile(cell(4)), nz.clean(cell(5)), self.source_id(cell(3)),
+                nz.clean(cell(6)), nz.clean(cell(7)),
+                self.model_id(nz.model_from_text(cell(7))), nz.upper(cell(9)),
+                nz.as_int(cell(10)), nz.as_int(cell(11)), nz.as_int(cell(12)),
+                nz.as_date(cell(13)), nz.clean(cell(14)), nz.as_datetime(cell(15)),
+                nz.clean(cell(17)), self.consultant_id(cell(18)),
+            ))
+        self.counts["test_drive"] = self.one("SELECT count(*) FROM test_drive")
+
+    def load_bookings(self):
+        """
+        Five tabs describe the order book from different angles. Each row keeps its
+        source_sheet, and only Current Month Booking is flagged as the August book,
+        so `is_current_period` is the safe filter for month numbers while the other
+        tabs stay available as the live/pending/carry-over views the floor uses.
+        """
+        # (sheet, header row, is_current_period, trailing note columns)
+        booking_tabs = [
+            ("Current Month Booking", 1, True, [18]),
+            ("Live Booking", 2, False, [15]),
+            ("Pending Booking", 1, False, [17, 18]),
+            ("Golf & Tiguan R Line Booking", 1, False, [18]),
+        ]
+        for sheet, header, current, note_cols in booking_tabs:
+            for _, cell in self.rows(sheet, header, 6):
+                notes = " | ".join(
+                    n for n in (nz.clean(cell(c)) for c in note_cols) if n) or None
+                model_label, variant_label = cell(8), cell(9)
+                self.cx.execute("""
+                    INSERT INTO booking (booking_date, contract_no, source_id,
+                        consultant_id, customer_name, mobile, model_id, variant_id,
+                        colour_id, model_year, long_model_text, fulfilment_status,
+                        car_origin, crm_entry_done, booking_amount,
+                        booking_amount_receipted, notes, source_sheet,
+                        period_id, is_current_period)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                    nz.as_date(cell(2)), nz.clean(cell(3)), self.source_id(cell(4)),
+                    self.consultant_id(cell(5)), nz.clean(cell(6)), nz.mobile(cell(7)),
+                    self.model_id(model_label),
+                    self.variant_id(model_label, variant_label, long_text=cell(11)),
+                    self.colour_id(cell(12)), nz.as_int(cell(10)), nz.clean(cell(11)),
+                    nz.fulfilment_status(cell(13)), nz.car_origin(cell(14)),
+                    nz.as_bool(cell(15)), nz.as_num(cell(16)),
+                    nz.as_bool(cell(17)) if sheet != "Pending Booking" else None,
+                    notes, sheet, self.period_id if current else None, current,
+                ))
+
+        # Booking & Alloted is the consolidated order book: it carries the team,
+        # the VIN once allotted, and DOB/DOA (date of booking / date of allotment).
+        for _, cell in self.rows("Booking & Alloted", 1, 11):
+            chassis = nz.upper(cell(8))
+            model_label, variant_label = cell(5), cell(6)
+            self.cx.execute("""
+                INSERT INTO booking (booking_date, invoice_ref, consultant_id, team_id,
+                    customer_name, model_id, variant_id, colour_id, model_year,
+                    fulfilment_status, ageing_days, vehicle_id, source_sheet,
+                    period_id, is_current_period)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                nz.as_date(cell(14)) or nz.as_date(cell(3)), nz.clean(cell(2)),
+                self.consultant_id(cell(12), team=cell(13)), self.team_id(cell(13)),
+                nz.clean(cell(11)), self.model_id(model_label),
+                self.variant_id(model_label, variant_label),
+                self.colour_id(cell(7)), nz.as_int(cell(4)),
+                nz.fulfilment_status(cell(10)), nz.as_int(cell(16)),
+                self.vehicle_by_chassis.get(chassis), "Booking & Alloted",
+                None, False,
+            ))
+        self.counts["booking"] = self.one("SELECT count(*) FROM booking")
+
+    def load_allotments(self):
+        """
+        The Alloted tab names the customer and the model but not the chassis, so the
+        vehicle is matched back through Stock & Allotted on customer name.
+        """
+        matched = 0
+        for _, cell in self.rows("Alloted", 1, 5):
+            customer = nz.upper(cell(5))
+            vehicle_id = self.cx.execute("""
+                SELECT v.vehicle_id FROM vehicle v
+                WHERE v.stock_status = 'ALLOTED'
+                  AND v.long_model_text = %s
+                  AND (v.stock_aging_days = %s OR %s IS NULL)
+                LIMIT 1
+                """, (nz.clean(cell(2)), nz.as_int(cell(4)), nz.as_int(cell(4)))
+            ).fetchone()
+            vid = vehicle_id[0] if vehicle_id else None
+            matched += 1 if vid else 0
+            booking = self.cx.execute("""
+                SELECT booking_id FROM booking
+                WHERE upper(customer_name) = %s ORDER BY is_current_period DESC LIMIT 1
+                """, (customer,)).fetchone()
+            self.cx.execute("""
+                INSERT INTO allotment (vehicle_id, booking_id, customer_name,
+                    consultant_id, long_model_text, colour, stock_aging_days,
+                    allotted_date, tat_days, vin, obd, remarks)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                vid, booking[0] if booking else None, nz.clean(cell(5)),
+                self.consultant_id(cell(6)), nz.clean(cell(2)),
+                nz.colour_key(cell(3)), nz.as_int(cell(4)), nz.as_date(cell(7)),
+                nz.as_int(cell(8)), nz.upper(cell(9)), nz.upper(cell(10)),
+                nz.clean(cell(11)),
+            ))
+        total = self.one("SELECT count(*) FROM allotment")
+        self.counts["allotment"] = total
+        if total and matched < total:
+            self.warnings.append(
+                f"allotment: {total - matched} of {total} rows could not be matched to "
+                "a vehicle (the Alloted tab has no chassis column)")
+
+    def load_registrations(self):
+        for _, cell in self.rows("Reg Report", 2, 3):
+            chassis = nz.upper(cell(3))
+            self.cx.execute("""
+                INSERT INTO registration (vehicle_id, chassis_number, customer_name,
+                    consultant_id, source_id, status, booking_date, allotted_date,
+                    nadcon_retail_date, contact_no, address, email,
+                    nadcon_punched_customer, folder_lined_up_on,
+                    folder_given_to_accounts_on, time_given, folder_sent_to_ho,
+                    invoice_date, registration_date, registration_no, voiw_id,
+                    delivery_date, finance_type, bank, has_insurance,
+                    has_extended_warranty, has_service_value_package, is_corporate,
+                    dwa, dwa_actual, accessories, vw_offers, elite_discount)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                self.vehicle_by_chassis.get(chassis), chassis, nz.clean(cell(18)),
+                self.consultant_id(cell(19)), self.source_id(cell(20)),
+                nz.upper(cell(17)), nz.as_date(cell(21)), nz.as_date(cell(22)),
+                nz.as_date(cell(23)), nz.mobile(cell(24)), nz.clean(cell(46)),
+                nz.clean(cell(47)), nz.clean(cell(25)), nz.as_date(cell(26)),
+                nz.as_date(cell(27)), nz.as_time(cell(28)), nz.as_date(cell(29)),
+                nz.as_date(cell(30)), nz.as_date(cell(31)), nz.upper(cell(32)),
+                nz.clean(cell(33)), nz.as_date(cell(34)), nz.upper(cell(35)),
+                nz.upper(cell(36)), nz.as_bool_lease(cell(37)), nz.as_bool(cell(38)),
+                nz.as_bool(cell(39)), nz.as_bool(cell(40)), nz.as_bool(cell(41)),
+                nz.as_bool(cell(42)), nz.as_num(cell(43)), nz.clean(cell(44)),
+                nz.as_num(cell(45)),
+            ))
+        self.counts["registration"] = self.one("SELECT count(*) FROM registration")
+
+    def load_scorecards(self):
+        """
+        SC Performance: each consultant occupies two rows - their primary channel and
+        a catch-all second row - interleaved with team subtotals and a grand total.
+        A row that names a person starts a new block; the row after it, which has no
+        name, is that person's secondary channel.
+        """
+        ws = self.wb["SC Performance"]
+        cols = dict(leads_target=4, total_leads=5, leads_qualified=6, td_target=7,
+                    td_achieved=8, booking_target=10, booking_achieved=11,
+                    booking_achieved_total=12, retail_target=14, retail_achieved=15,
+                    retail_achieved_total=16, finance_target=18, finance_achieved=19,
+                    insurance_target=21, insurance_achieved=22, ew_target=24,
+                    ew_achieved=25, svp=27, dwa_eva=28, dwa_achieved=29,
+                    taigun_target=30, taigun_achieved=31, punched_vin_target=32,
+                    punched_vin_achieved=33, referral_target=34, referral_achieved=35,
+                    cancelled=36, allotted=37, coverage=38)
+        field_names = list(cols)
+        current_label = None
+
+        for r in range(5, ws.max_row + 1):
+            raw_label = nz.clean(ws.cell(r, 2).value) or nz.clean(ws.cell(r, 1).value)
+            lead_type = nz.clean(ws.cell(r, 3).value)
+            has_numbers = any(
+                nz.as_num(ws.cell(r, c).value) is not None for c in cols.values())
+            if not has_numbers:
+                continue
+            # Row 30 onwards is the channel roll-up block, handled separately.
+            if raw_label and raw_label.lower() in {"total leads", "qualified leads",
+                                                   "booking", "%"}:
+                continue
+
+            if raw_label:
+                current_label = raw_label
+                is_primary = True
+            else:
+                is_primary = False          # continuation row for the label above
+            if not current_label:
+                continue
+
+            upper_label = current_label.upper()
+            if upper_label.startswith("TOTAL"):
+                row_kind = "GRAND_TOTAL"
+            elif upper_label.startswith(("S/R TEAM", "FIELD TEAM")):
+                row_kind = "TEAM_TOTAL"
+            elif nz.consultant_key(current_label):
+                row_kind = "CONSULTANT"
+            else:
+                row_kind = "OTHER"          # Workshop, Co-Dealer, Javeed
+
+            values = [nz.as_num(ws.cell(r, cols[f]).value) for f in field_names]
+            self.cx.execute(f"""
+                INSERT INTO target_consultant_scorecard
+                    (period_id, consultant_id, row_label, row_kind, lead_type,
+                     is_primary_channel, {", ".join(field_names)})
+                VALUES ({", ".join(["%s"] * (6 + len(field_names)))})
+                ON CONFLICT (period_id, row_label, COALESCE(lead_type,'')) DO NOTHING
+                """, [self.period_id, self.consultant_id(current_label), current_label,
+                      row_kind, lead_type, is_primary, *values])
+        self.counts["target_consultant_scorecard"] = self.one(
+            "SELECT count(*) FROM target_consultant_scorecard")
+
+    def load_channel_funnel(self):
+        """Channel roll-up at the foot of SC Performance (rows 30-35)."""
+        ws = self.wb["SC Performance"]
+        header_row = None
+        for r in range(28, ws.max_row + 1):
+            if nz.upper(ws.cell(r, 3).value) == "CRM":
+                header_row = r
+                break
+        if header_row is None:
+            self.warnings.append("SC Performance: channel roll-up block not found")
+            return
+
+        metric_rows = {}
+        for r in range(header_row + 1, min(header_row + 8, ws.max_row + 1)):
+            label = (nz.clean(ws.cell(r, 2).value) or "").lower()
+            if label in {"total leads", "qualified leads", "booking"}:
+                metric_rows[label] = r
+
+        for c in range(3, ws.max_column + 1):
+            channel = nz.upper(ws.cell(header_row, c).value)
+            if not channel:
+                continue
+            self.cx.execute("""
+                INSERT INTO target_channel_funnel
+                    (period_id, channel, total_leads, qualified_leads, bookings)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (period_id, channel) DO NOTHING
+                """, (
+                self.period_id, channel,
+                nz.as_int(ws.cell(metric_rows["total leads"], c).value)
+                if "total leads" in metric_rows else None,
+                nz.as_int(ws.cell(metric_rows["qualified leads"], c).value)
+                if "qualified leads" in metric_rows else None,
+                nz.as_int(ws.cell(metric_rows["booking"], c).value)
+                if "booking" in metric_rows else None,
+            ))
+        self.counts["target_channel_funnel"] = self.one(
+            "SELECT count(*) FROM target_channel_funnel")
+
+    def load_booking_commitments(self):
+        """Book Comm VS Ach: three week windows, committed vs achieved."""
+        ws = self.wb["Book Comm VS Ach"]
+        windows = []
+        for c in range(2, ws.max_column + 1, 2):
+            label = nz.upper(ws.cell(2, c).value)
+            if label:
+                windows.append((label, c, c + 1))
+        for r in range(3, ws.max_row + 1):
+            label = nz.upper(ws.cell(r, 1).value)
+            if not label:
+                continue
+            for window, ccol, acol in windows:
+                committed = nz.as_num(ws.cell(r, ccol).value)
+                achieved = nz.as_num(ws.cell(r, acol).value)
+                if committed is None and achieved is None:
+                    continue
+                self.cx.execute("""
+                    INSERT INTO target_booking_commitment
+                        (period_id, consultant_label, window_label, committed, achieved)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (period_id, consultant_label, window_label) DO NOTHING
+                    """, (self.period_id, label, window, committed, achieved))
+        self.counts["target_booking_commitment"] = self.one(
+            "SELECT count(*) FROM target_booking_commitment")
+
+    def load_daily_tracker(self):
+        """
+        Daily Tracker is a wide grid of channel blocks. The leftmost twelve columns
+        are the same overall summary under every block header, so those are what get
+        loaded, one set of rows per block.
+
+        Both blocks are kept because they disagree - the upper block gives AKHILESH an
+        enquiry target of 63, the lower one 45 - and silently picking a winner would
+        hide that. Views read BLOCK_2, the block with the full roster and team
+        subtotals; BLOCK_1 is retained for audit.
+        """
+        ws = self.wb["Daily Tracker"]
+        header_rows = [r for r in range(1, ws.max_row + 1)
+                       if nz.upper(ws.cell(r, 1).value) == "SC NAME"]
+        for block_no, header in enumerate(header_rows, start=1):
+            end = header_rows[block_no] if block_no < len(header_rows) else ws.max_row + 1
+            for r in range(header + 1, end):
+                label = nz.upper(ws.cell(r, 1).value)
+                if not label:
+                    continue
+                self.cx.execute("""
+                    INSERT INTO target_daily_tracker (period_id, consultant_label,
+                        block_label, enq_target, enq_achieved, booking_target,
+                        booking_achieved, td_target, td_achieved, retail_target,
+                        retail_achieved, live_booking)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """, (
+                    self.period_id, label, f"BLOCK_{block_no}",
+                    nz.as_num(ws.cell(r, 2).value), nz.as_num(ws.cell(r, 3).value),
+                    nz.as_num(ws.cell(r, 4).value), nz.as_num(ws.cell(r, 5).value),
+                    nz.as_num(ws.cell(r, 7).value), nz.as_num(ws.cell(r, 8).value),
+                    nz.as_num(ws.cell(r, 10).value), nz.as_num(ws.cell(r, 11).value),
+                    nz.as_num(ws.cell(r, 12).value),
+                ))
+        self.counts["target_daily_tracker"] = self.one(
+            "SELECT count(*) FROM target_daily_tracker")
+
+    def link_bookings_to_vehicles(self):
+        """
+        Close the loop between the order book and inventory using the allotment rows,
+        so a booking can be answered with "your car is chassis X" rather than a model name.
+        """
+        updated = self.cx.execute("""
+            UPDATE booking b SET vehicle_id = a.vehicle_id
+            FROM allotment a
+            WHERE a.booking_id = b.booking_id
+              AND a.vehicle_id IS NOT NULL
+              AND b.vehicle_id IS NULL
+            """).rowcount
+        self.counts["booking_vehicle_links"] = updated
+
+    # -----------------------------------------------------------------
+
+    def reset(self):
+        """
+        Clear what this load is about to rebuild - and nothing else.
+
+        A reload used to truncate every table, which would now throw away the
+        dealership's own work: bookings, enquiries and test drives entered
+        through the dashboard carry origin = 'MANUAL' and have to survive a
+        refresh of the workbook. Only WORKBOOK rows are removed.
+        """
+        for table in WORKBOOK_FACTS:
+            deleted = self.cx.execute(
+                f"DELETE FROM {table} WHERE origin = 'WORKBOOK'").rowcount
+            if deleted:
+                self.counts[f"{table}_replaced"] = deleted
+        for table in PERIOD_TARGETS:
+            self.cx.execute(f"DELETE FROM {table} WHERE period_id = %s",
+                            (self.period_id,))
+        kept = self.one("SELECT count(*) FROM booking WHERE origin = 'MANUAL'")
+        if kept:
+            self.warnings.append(
+                f"kept {kept} manually entered booking(s) through the reload")
+
+    def run(self):
+        self.cx.execute("SET search_path = dsr, public")
+        self.load_period()
+        self.reset()
+        self.load_vehicles()
+        self.load_teams_and_channels()
+        self.load_leads()
+        self.load_test_drives()
+        self.load_bookings()
+        self.load_allotments()
+        self.load_registrations()
+        self.load_scorecards()
+        self.load_channel_funnel()
+        self.load_booking_commitments()
+        self.load_daily_tracker()
+        self.link_bookings_to_vehicles()
+        # Reference-table sizes are worth reporting too - they show whether a new
+        # trim or a new joiner turned up in this workbook.
+        for table in ("dim_consultant", "dim_model", "dim_variant", "dim_colour",
+                      "dim_lead_source", "dim_team"):
+            self.counts[table] = self.one(f"SELECT count(*) FROM {table}")
+        return self.counts
+
+
+def cell_of(ws, row, col):
+    return ws.cell(row, col).value
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Load a DSR workbook into Postgres.")
+    ap.add_argument("--file", default=str(DEFAULT_FILE))
+    ap.add_argument("--dsn", default=DEFAULT_DSN)
+    ap.add_argument("--period", default="AUG2026")
+    ap.add_argument("--start", default="2026-08-01")
+    ap.add_argument("--end", default="2026-08-31")
+    args = ap.parse_args()
+
+    path = Path(args.file)
+    if not path.exists():
+        raise SystemExit(f"workbook not found: {path}")
+
+    print(f"reading   {path.name}")
+    wb = openpyxl.load_workbook(path, data_only=True)
+
+    with psycopg.connect(args.dsn) as cx:
+        loader = Loader(
+            cx, wb, args.period,
+            datetime.strptime(args.start, "%Y-%m-%d").date(),
+            datetime.strptime(args.end, "%Y-%m-%d").date(),
+        )
+        counts = loader.run()
+        cx.execute("""
+            INSERT INTO etl_run (source_file, file_modified, finished_at, row_counts, notes)
+            VALUES (%s, %s, now(), %s, %s)
+            """, (path.name,
+                  datetime.fromtimestamp(path.stat().st_mtime),
+                  json.dumps(counts),
+                  "; ".join(loader.warnings) or None))
+        cx.commit()
+
+    width = max(len(k) for k in counts)
+    print("\nloaded:")
+    for table, n in counts.items():
+        print(f"  {table:<{width}}  {n:>6}")
+    if loader.warnings:
+        print("\nnotes:")
+        for w in loader.warnings:
+            print(f"  - {w}")
+
+
+if __name__ == "__main__":
+    main()
