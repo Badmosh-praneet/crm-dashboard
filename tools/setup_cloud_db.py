@@ -17,6 +17,8 @@ from pathlib import Path
 import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def main():
@@ -25,9 +27,9 @@ def main():
     else:
         dsn = os.environ.get("DATABASE_URL", "").strip()
 
-    if not dsn or "127.0.0.1" in dsn or "localhost" in dsn:
-        print("Error: Please provide a valid cloud PostgreSQL connection string.")
-        print('Example: python tools/setup_cloud_db.py "postgresql://user:pass@ep-xyz.neon.tech/neondb?sslmode=require"')
+    if not dsn:
+        print("Error: Please provide a valid PostgreSQL connection string.")
+        print('Example: python tools/setup_cloud_db.py "postgresql://postgres:postgres@127.0.0.1:5432/elite_dsr"')
         sys.exit(1)
 
     if dsn.startswith("postgres://"):
@@ -52,8 +54,13 @@ def main():
         os.environ["DATABASE_URL"] = dsn
 
         print("3/4 Running ETL to load DSR August 2026 workbook into PostgreSQL...")
+        orig_argv = sys.argv[:]
+        sys.argv = [sys.argv[0], "--dsn", dsn]
         from etl.load_dsr import main as run_etl
-        run_etl()
+        try:
+            run_etl()
+        finally:
+            sys.argv = orig_argv
 
         with psycopg.connect(dsn, autocommit=True) as conn:
             with conn.cursor() as cur:
