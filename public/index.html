@@ -1,0 +1,1315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elite Motors DSR</title>
+<style>
+/* ---------------------------------------------------------------
+   Tokens. Light is the base; dark is a selected set of steps for the
+   dark surface, declared under both the OS query and the theme stamp.
+   --------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --page:        #f9f9f7;
+  --surface:     #fcfcfb;
+  --sunken:      #f0efec;
+  --ink:         #0b0b0b;
+  --ink-2:       #52514e;
+  --ink-muted:   #898781;
+  --grid:        #e1e0d9;
+  --axis:        #c3c2b7;
+  --border:      rgba(11,11,11,0.10);
+
+  --s1: #2a78d6;  --s2: #eb6834;  --s3: #1baf7a;
+
+  /* ordinal blue ramp - nothing lighter than step 250 on the light surface */
+  --o1: #86b6ef;  --o2: #5598e7;  --o3: #2a78d6;  --o4: #1c5cab;  --o5: #104281;
+
+  --good: #0ca30c;  --warning: #fab219;  --serious: #ec835a;  --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --sunken:    #232322;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --ink-muted: #898781;
+    --grid:      #2c2c2a;
+    --axis:      #383835;
+    --border:    rgba(255,255,255,0.10);
+    --s1: #3987e5;  --s2: #d95926;  --s3: #199e70;
+    --o1: #184f95;  --o2: #256abf;  --o3: #3987e5;  --o4: #6da7ec;  --o5: #9ec5f4;
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:      #0d0d0d;
+  --surface:   #1a1a19;
+  --sunken:    #232322;
+  --ink:       #ffffff;
+  --ink-2:     #c3c2b7;
+  --ink-muted: #898781;
+  --grid:      #2c2c2a;
+  --axis:      #383835;
+  --border:    rgba(255,255,255,0.10);
+  --s1: #3987e5;  --s2: #d95926;  --s3: #199e70;
+  --o1: #184f95;  --o2: #256abf;  --o3: #3987e5;  --o4: #6da7ec;  --o5: #9ec5f4;
+  --good-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1280px; margin: 0 auto; padding: 24px 20px 64px; }
+
+header { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+         justify-content: space-between; margin-bottom: 22px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 2px; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); font-size: 13px; }
+.prov { color: var(--ink-muted); font-size: 12px; margin-top: 4px; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+button, select, input, textarea {
+  font: inherit; font-size: 13px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 7px; padding: 6px 10px;
+}
+button { color: var(--ink-2); font-size: 12px; cursor: pointer; padding: 6px 11px; }
+button:hover { color: var(--ink); }
+button[aria-pressed="true"] { color: var(--ink); border-color: var(--axis); }
+button.primary { background: var(--s1); border-color: var(--s1); color: #fff;
+                 font-weight: 500; }
+button.primary:hover { color: #fff; filter: brightness(1.07); }
+button.danger { color: var(--critical); }
+:is(button, select, input, textarea):focus-visible {
+  outline: 2px solid var(--s1); outline-offset: 1px;
+}
+
+/* live indicator: state in shape as well as colour */
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+        color: var(--ink-2); border: 1px solid var(--border);
+        border-radius: 999px; padding: 5px 11px; }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-muted); }
+.live[data-state="live"] i { background: var(--good); }
+.live[data-state="live"] i { animation: pulse 2.4s ease-in-out infinite; }
+.live[data-state="down"] i { background: var(--critical); }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+@media (prefers-reduced-motion: reduce) { .live i { animation: none !important } }
+
+/* ---- hero + tiles ---- */
+.hero {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 22px; margin-bottom: 14px;
+  display: flex; flex-wrap: wrap; gap: 28px; align-items: center;
+}
+.hero-fig { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.hero-of { font-size: 16px; font-weight: 400; color: var(--ink-muted); }
+.hero-label { color: var(--ink-2); font-size: 13px; margin-bottom: 6px; }
+.hero-meter { flex: 1 1 260px; min-width: 220px; }
+.meter { height: 10px; border-radius: 5px; overflow: hidden; background: var(--o1); }
+.meter > i { display: block; height: 100%; border-radius: 5px; }
+.meter-cap { display: flex; justify-content: space-between;
+             color: var(--ink-muted); font-size: 12px; margin-top: 6px; }
+
+.tiles { display: grid; gap: 12px; margin-bottom: 22px;
+         grid-template-columns: repeat(auto-fit, minmax(min(158px, 100%), 1fr)); }
+.tile { background: var(--surface); border: 1px solid var(--border);
+        border-radius: 11px; padding: 14px 15px; }
+.tile .label { color: var(--ink-2); font-size: 12px; margin-bottom: 5px; }
+.tile .value { font-size: 25px; font-weight: 600; line-height: 1.1; letter-spacing: -0.01em; }
+.tile .note { color: var(--ink-muted); font-size: 11.5px; margin-top: 4px; }
+.tile .note.alarm { color: var(--critical); }
+
+/* a changed figure flashes once, so a live update is noticed */
+@keyframes flash { from { background: color-mix(in srgb, var(--s1) 22%, transparent) } }
+.flash { animation: flash 1.1s ease-out; }
+@media (prefers-reduced-motion: reduce) { .flash { animation: none } }
+
+/* ---- panels ---- */
+.grid { display: grid; gap: 14px; margin-bottom: 14px; }
+/* min(440px, 100%) not 440px: a bare minmax minimum cannot shrink, so on a
+   narrow window the track stays 440px wide and the whole page scrolls
+   sideways instead of the columns stacking. */
+.g2 { grid-template-columns: repeat(auto-fit, minmax(min(440px, 100%), 1fr)); }
+.panel { background: var(--surface); border: 1px solid var(--border);
+         border-radius: 12px; padding: 18px 20px; min-width: 0; }
+.panel h2 { font-size: 14px; font-weight: 600; margin: 0 0 3px; }
+.panel .hint { color: var(--ink-muted); font-size: 12px; margin: 0 0 14px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px;
+          color: var(--ink-2); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--ink-2); font: 11.5px system-ui, -apple-system, "Segoe UI", sans-serif; }
+svg text.val { fill: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+svg text.ax  { fill: var(--ink-muted); font-variant-numeric: tabular-nums; }
+svg .gridline { stroke: var(--grid); stroke-width: 1; }
+svg .baseline { stroke: var(--axis); stroke-width: 1; }
+svg .tmark    { stroke: var(--ink); stroke-width: 2; stroke-linecap: round; }
+svg .hit:hover { opacity: 0.82; cursor: default; }
+
+/* ---- tables ---- */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid);
+         white-space: nowrap; }
+th { color: var(--ink-muted); font-weight: 500; font-size: 11.5px;
+     text-transform: uppercase; letter-spacing: 0.04em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: none; }
+td select { padding: 2px 6px; font-size: 12px; border-radius: 5px; }
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px;
+        font-size: 11px; border: 1px solid var(--border); color: var(--ink-2); }
+.tag { display: inline-block; font-size: 10.5px; letter-spacing: 0.04em;
+       text-transform: uppercase; color: var(--ink-muted);
+       border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.dq { display: flex; gap: 11px; padding: 11px 0; border-bottom: 1px solid var(--grid); }
+.dq:last-child { border-bottom: none; }
+.dq .sev { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; }
+.dq .issue { font-weight: 500; }
+.dq .detail { color: var(--ink-2); font-size: 12.5px; margin-top: 2px; }
+.dq .count { flex: none; color: var(--ink-muted); font-variant-numeric: tabular-nums;
+             font-size: 12px; }
+
+.datatable { display: none; margin-top: 14px; }
+body.tables .datatable { display: block; }
+.loading { color: var(--ink-muted); padding: 26px 0; }
+.tt {
+  position: fixed; pointer-events: none; z-index: 60; opacity: 0;
+  transition: opacity .08s; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--axis); border-radius: 8px; padding: 7px 10px;
+  font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.13); max-width: 260px;
+}
+.tt b { font-variant-numeric: tabular-nums; }
+footer { color: var(--ink-muted); font-size: 12px; margin-top: 26px;
+         padding-top: 16px; border-top: 1px solid var(--grid); }
+footer code { background: var(--sunken); padding: 1px 5px; border-radius: 3px;
+              font-size: 11.5px; }
+
+/* ---- entry drawer ---- */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.34); z-index: 40;
+         opacity: 0; pointer-events: none; transition: opacity .16s; }
+body.drawer .scrim { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100%);
+  background: var(--surface); border-left: 1px solid var(--border); z-index: 50;
+  transform: translateX(100%); transition: transform .2s ease;
+  display: flex; flex-direction: column;
+}
+body.drawer .drawer { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .drawer, .scrim { transition: none; }
+}
+.drawer-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--grid);
+               display: flex; justify-content: space-between; align-items: flex-start;
+               gap: 12px; }
+.drawer-head h2 { margin: 0 0 2px; font-size: 16px; font-weight: 600; }
+.drawer-head p { margin: 0; color: var(--ink-muted); font-size: 12px; }
+.tabs { display: flex; gap: 4px; padding: 12px 20px 0; flex-wrap: wrap; }
+.tabs button { border-radius: 999px; font-size: 12px; }
+.tabs button[aria-selected="true"] { background: var(--sunken);
+  border-color: var(--axis); color: var(--ink); font-weight: 500; }
+.drawer-body { flex: 1; overflow-y: auto; padding: 16px 20px 24px; }
+.field { display: block; margin-bottom: 12px; }
+.field > span { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.field > span em { color: var(--ink-muted); font-style: normal; }
+.field input, .field select, .field textarea { width: 100%; }
+.field textarea { min-height: 56px; resize: vertical; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.note-box { background: var(--sunken); border-radius: 8px; padding: 10px 12px;
+            font-size: 12px; color: var(--ink-2); margin-bottom: 14px; }
+.note-box b { color: var(--ink); font-weight: 500; }
+.drawer-foot { display: flex; gap: 8px; justify-content: flex-end;
+               padding: 14px 20px; border-top: 1px solid var(--grid); }
+.err { color: var(--critical); font-size: 12.5px; margin: 0 0 12px;
+       white-space: pre-wrap; }
+
+/* ---- toasts ---- */
+.toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+          z-index: 70; display: flex; flex-direction: column; gap: 8px;
+          align-items: center; pointer-events: none; }
+.toast { pointer-events: auto; background: var(--surface); color: var(--ink);
+         border: 1px solid var(--axis); border-radius: 9px;
+         padding: 9px 14px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.16);
+         display: flex; align-items: center; gap: 10px; max-width: 92vw; }
+.toast i { width: 7px; height: 7px; border-radius: 50%; flex: none;
+           background: var(--good); }
+.toast.bad i { background: var(--critical); }
+.toast button { padding: 3px 9px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Volkswagen Elite Motors &mdash; Daily Sales Report</h1>
+      <div class="sub" id="period">Loading&hellip;</div>
+      <div class="prov" id="prov"></div>
+    </div>
+    <div class="controls">
+      <select id="periodSel" title="Reporting month"></select>
+      <span class="live" id="liveDot" data-state="off" title="Live connection to the database">
+        <i></i><span id="liveText">connecting</span>
+      </span>
+      <button class="primary" id="addBtn">+ New entry</button>
+      <button id="tbtn" aria-pressed="false">Show data tables</button>
+      <button id="theme">Theme</button>
+    </div>
+  </header>
+
+  <div id="root"><div class="loading">Loading dashboard&hellip;</div></div>
+
+  <footer>
+    Live from PostgreSQL. Records entered here are written straight to the
+    <code>dsr</code> schema, and every open dashboard is pushed an update by a
+    database trigger &mdash; so a change made in <code>psql</code>, by the workbook
+    loader, or by an agent shows up here just the same.
+  </footer>
+</div>
+
+<div class="tt" id="tt"></div>
+<div class="toasts" id="toasts"></div>
+<div class="scrim" id="scrim"></div>
+
+<aside class="drawer" id="drawer" aria-hidden="true" aria-label="New entry">
+  <div class="drawer-head">
+    <div>
+      <h2>New entry</h2>
+      <p id="drawerSub">Saved straight to the database.</p>
+    </div>
+    <button id="closeBtn" aria-label="Close">Close</button>
+  </div>
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="drawer-body" id="formHost"></div>
+  <div class="drawer-foot">
+    <button id="cancelBtn">Cancel</button>
+    <button class="primary" id="saveBtn">Save</button>
+  </div>
+</aside>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const api = p => fetch(p).then(r => { if (!r.ok) throw new Error(p); return r.json(); });
+
+async function send(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = await r.json().catch(() => null);
+  if (!r.ok) {
+    // FastAPI validation errors arrive as a list of {loc, msg}.
+    const detail = payload && payload.detail;
+    const msg = Array.isArray(detail)
+      ? detail.map(d => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("\n")
+      : (detail || `${r.status} ${r.statusText}`);
+    throw new Error(msg);
+  }
+  return payload;
+}
+
+/* ---- formatting ---- */
+const n0 = v => v == null ? "–" : Number(v).toLocaleString("en-IN");
+const pct = v => v == null ? "–" : Number(v).toFixed(1) + "%";
+// Indian money shorthand: the dealership talks in lakh and crore, not millions.
+function money(v) {
+  if (v == null) return "–";
+  v = Number(v);
+  if (v >= 1e7) return "₹" + (v / 1e7).toFixed(2) + " Cr";
+  if (v >= 1e5) return "₹" + (v / 1e5).toFixed(2) + " L";
+  return "₹" + v.toLocaleString("en-IN");
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const dt = s => s ? new Date(s).toLocaleDateString("en-IN",
+  { day: "2-digit", month: "short", year: "numeric" }) : "–";
+const iso = d => d.toISOString().slice(0, 10);
+// Title case for display, but the trade's acronyms stay upper: "GOLF GTI" must
+// not become "Golf Gti", nor "TAIGUN (FL)" become "Taigun (fl)".
+const KEEP_UPPER = new Set(["GTI", "GT", "FL", "R-LINE", "AT", "MT", "DSG",
+                            "TSI", "MQ", "SVP", "EW", "DWA", "CRM", "IVRS",
+                            "IPOPI", "WS", "TD", "HL", "CL", "VW", "B2B", "B2C"]);
+const title = s => String(s ?? "").split(/\s+/).map(w => {
+  if (KEEP_UPPER.has(w.replace(/[()]/g, "").toUpperCase())) return w.toUpperCase();
+  return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+}).join(" ");
+// "TAYRON TAYRON" - for models with a single trim the variant repeats the model
+// name, so only append the variant when it says something new.
+const sameName = (model, variant) =>
+  !variant || variant.toUpperCase() === String(model || "").toUpperCase();
+const carName = (model, variant) =>
+  sameName(model, variant) ? title(model) : `${title(model)} ${variant}`;
+
+// Achievement against target, used for meter colour.
+function severity(p) {
+  if (p == null) return "var(--ink-muted)";
+  if (p >= 95) return "var(--good)";
+  if (p >= 75) return "var(--warning)";
+  if (p >= 50) return "var(--serious)";
+  return "var(--critical)";
+}
+
+/* ---- toasts ---- */
+function toast(message, { bad = false, action } = {}) {
+  const el = document.createElement("div");
+  el.className = "toast" + (bad ? " bad" : "");
+  el.innerHTML = `<i></i><span>${esc(message)}</span>`;
+  if (action) {
+    const b = document.createElement("button");
+    b.textContent = action.label;
+    b.onclick = () => { el.remove(); action.run(); };
+    el.appendChild(b);
+  }
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), action ? 9000 : 4200);
+}
+
+/* ---- tooltip ---- */
+const tt = $("#tt");
+function bindTip(el, html) {
+  el.addEventListener("pointerenter", e => {
+    tt.innerHTML = html; tt.style.opacity = 1; moveTip(e);
+  });
+  el.addEventListener("pointermove", moveTip);
+  el.addEventListener("pointerleave", () => { tt.style.opacity = 0; });
+}
+function moveTip(e) {
+  const pad = 14, r = tt.getBoundingClientRect();
+  let x = e.clientX + pad, y = e.clientY + pad;
+  if (x + r.width  > innerWidth  - 8) x = e.clientX - r.width  - pad;
+  if (y + r.height > innerHeight - 8) y = e.clientY - r.height - pad;
+  tt.style.left = x + "px"; tt.style.top = y + "px";
+}
+
+/* =================================================================
+   Chart builders. Plain SVG - thin marks, 4px rounded data ends,
+   recessive grid, selective direct labels, hover on every mark.
+   ================================================================= */
+const SVGNS = "http://www.w3.org/2000/svg";
+const mk = (t, a={}) => {
+  const e = document.createElementNS(SVGNS, t);
+  for (const k in a) e.setAttribute(k, a[k]);
+  return e;
+};
+
+/** Horizontal bars with an optional target tick. */
+function hbars(rows, opt={}) {
+  const labelW = opt.labelW ?? 132, valueW = 52, rowH = opt.rowH ?? 30, barH = opt.barH ?? 13;
+  // The viewBox scales to the panel, so a chart in a half-width panel needs a
+  // narrower box or its 11.5px labels render at half that on screen.
+  const W = opt.width ?? 660, plotW = W - labelW - valueW, H = rows.length * rowH + 8;
+  const max = opt.max ?? Math.max(1, ...rows.flatMap(r => [r.value || 0, r.target || 0]));
+  const svg = mk("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  for (let i = 0; i <= 4; i++) {
+    const x = labelW + plotW * i / 4;
+    svg.appendChild(mk("line", { x1: x, x2: x, y1: 0, y2: H - 8, class: "gridline" }));
+  }
+  svg.appendChild(mk("line", { x1: labelW, x2: labelW, y1: 0, y2: H - 8, class: "baseline" }));
+
+  rows.forEach((r, i) => {
+    const y = i * rowH + (rowH - barH) / 2;
+    const w = Math.max(0, (r.value || 0) / max * plotW);
+    const lab = mk("text", { x: labelW - 10, y: y + barH / 2 + 4, "text-anchor": "end" });
+    lab.textContent = r.label;
+    svg.appendChild(lab);
+
+    const bar = mk("rect", {
+      x: labelW, y, width: w, height: barH, rx: 4,
+      fill: r.colour || "var(--s1)", class: "hit",
+    });
+    svg.appendChild(bar);
+    bindTip(bar, r.tip);
+
+    if (r.target != null) {
+      const tx = labelW + r.target / max * plotW;
+      svg.appendChild(mk("line", {
+        x1: tx, x2: tx, y1: y - 4, y2: y + barH + 4, class: "tmark",
+      }));
+    }
+    const v = mk("text", { x: labelW + plotW + 8, y: y + barH / 2 + 4, class: "val" });
+    v.textContent = opt.fmt ? opt.fmt(r.value) : n0(r.value);
+    svg.appendChild(v);
+  });
+  return svg;
+}
+
+/**
+ * Grouped horizontal bars - several series per category, one shared scale.
+ *
+ * A target is drawn as a tick on its own series' bar, never as a bar of its own -
+ * a filled target bar competes with the actual and reads as a second achievement.
+ */
+function groupedBars(cats, series, opt={}) {
+  const labelW = opt.labelW ?? 118, valueW = 8, barH = opt.barH ?? 10, gap = 2;
+  const groupH = series.length * (barH + gap) + 16;
+  const W = opt.width ?? 660, plotW = W - labelW - valueW - 34, H = cats.length * groupH + 6;
+  const max = Math.max(1, ...cats.flatMap(c =>
+    [...c.values, ...(c.targets || [])].map(v => v || 0)));
+  const svg = mk("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  for (let i = 0; i <= 4; i++) {
+    const x = labelW + plotW * i / 4;
+    svg.appendChild(mk("line", { x1: x, x2: x, y1: 0, y2: H - 6, class: "gridline" }));
+  }
+  svg.appendChild(mk("line", { x1: labelW, x2: labelW, y1: 0, y2: H - 6, class: "baseline" }));
+
+  cats.forEach((c, ci) => {
+    const top = ci * groupH + 8;
+    const lab = mk("text", {
+      x: labelW - 10, y: top + (groupH - 16) / 2 + 4, "text-anchor": "end",
+    });
+    lab.textContent = c.label;
+    svg.appendChild(lab);
+
+    series.forEach((s, si) => {
+      const y = top + si * (barH + gap);
+      const w = Math.max(0, (c.values[si] || 0) / max * plotW);
+      const target = c.targets ? c.targets[si] : null;
+
+      // Bullet-chart track: the unfilled remainder of the target, in a washed
+      // step of the series' own colour, so the shortfall is a visible distance
+      // rather than empty panel between a bar and a floating tick.
+      if (target != null && target > 0) {
+        svg.appendChild(mk("rect", {
+          x: labelW, y, width: target / max * plotW, height: barH, rx: 4,
+          fill: s.colour, "fill-opacity": 0.16,
+        }));
+      }
+      const bar = mk("rect", {
+        x: labelW, y, width: w, height: barH, rx: 4, fill: s.colour, class: "hit",
+      });
+      svg.appendChild(bar);
+      bindTip(bar, c.tips[si]);
+
+      if (target != null && target > 0) {
+        const tx = labelW + target / max * plotW;
+        svg.appendChild(mk("line", {
+          x1: tx, x2: tx, y1: y - 2, y2: y + barH + 2, class: "tmark",
+        }));
+      }
+      if (c.values[si] != null) {
+        // The label belongs at the end of its own bar. Only when that would land
+        // on the target tick does it step past it.
+        const tx = target ? labelW + target / max * plotW : 0;
+        let x = labelW + w + 6;
+        if (tx && Math.abs(x - tx) < 16) x = tx + 7;
+        const v = mk("text", { x, y: y + barH - 1, class: "ax" });
+        v.textContent = n0(c.values[si]);
+        svg.appendChild(v);
+      }
+    });
+  });
+  return svg;
+}
+
+/** Stacked horizontal bars for an ordered ramp, with a 2px surface gap. */
+function stackedBars(cats, segs, opt={}) {
+  const labelW = opt.labelW ?? 118, rowH = 30, barH = 14;
+  const W = opt.width ?? 660, plotW = W - labelW - 52, H = cats.length * rowH + 6;
+  const max = Math.max(1, ...cats.map(c => c.values.reduce((a, b) => a + (b || 0), 0)));
+  const svg = mk("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  for (let i = 0; i <= 4; i++) {
+    const x = labelW + plotW * i / 4;
+    svg.appendChild(mk("line", { x1: x, x2: x, y1: 0, y2: H - 6, class: "gridline" }));
+  }
+  svg.appendChild(mk("line", { x1: labelW, x2: labelW, y1: 0, y2: H - 6, class: "baseline" }));
+
+  cats.forEach((c, ci) => {
+    const y = ci * rowH + (rowH - barH) / 2;
+    const lab = mk("text", { x: labelW - 10, y: y + barH / 2 + 4, "text-anchor": "end" });
+    lab.textContent = c.label;
+    svg.appendChild(lab);
+
+    let x = labelW;
+    const total = c.values.reduce((a, b) => a + (b || 0), 0);
+    c.values.forEach((v, si) => {
+      if (!v) return;
+      const w = v / max * plotW;
+      const seg = mk("rect", {
+        x, y, width: Math.max(0, w - 2), height: barH, rx: 3,
+        fill: segs[si].colour, class: "hit",
+      });
+      svg.appendChild(seg);
+      bindTip(seg, `<b>${esc(c.label)}</b><br>${esc(segs[si].name)} days: <b>${n0(v)}</b> of ${n0(total)}`);
+      x += w;
+    });
+    const t = mk("text", { x: labelW + plotW + 8, y: y + barH / 2 + 4, class: "val" });
+    t.textContent = n0(total);
+    svg.appendChild(t);
+  });
+  return svg;
+}
+
+/* ---- generic table renderer ---- */
+function table(cols, rows, mapper) {
+  const head = cols.map(c =>
+    `<th class="${c.num ? "num" : ""}">${esc(c.label)}</th>`).join("");
+  const body = rows.length
+    ? rows.map(r => "<tr>" + mapper(r).map((cell, i) =>
+        `<td class="${cols[i].num ? "num" : ""}">${cell}</td>`).join("") + "</tr>").join("")
+    : `<tr><td colspan="${cols.length}" style="color:var(--ink-muted)">Nothing to show.</td></tr>`;
+  return `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function panel(title, hint, inner) {
+  return `<section class="panel"><h2>${esc(title)}</h2>
+          <p class="hint">${hint}</p>${inner}</section>`;
+}
+function legend(items) {
+  return `<div class="legend">` + items.map(i =>
+    `<span><i class="swatch" style="background:${i.colour}"></i>${esc(i.name)}</span>`
+  ).join("") + `</div>`;
+}
+
+/* =================================================================
+   State and rendering
+   ================================================================= */
+const S = { data: null, options: null, periods: [], prevKpi: null };
+
+async function fetchAll() {
+  const [kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
+         meta, attach, periods, options, activity, orderbook] =
+    await Promise.all([
+      api("/api/kpi"), api("/api/funnel"), api("/api/leaderboard"),
+      api("/api/leads/sourcewise"), api("/api/models/position"),
+      api("/api/stock/ageing"), api("/api/backorders"), api("/agent/action-list"),
+      api("/api/data-quality"), api("/api/meta"), api("/api/attachments"),
+      api("/api/periods"), api("/api/entry-options"), api("/api/recent-activity?limit=12"),
+      api("/api/bookings?limit=40"),
+    ]);
+  S.periods = periods;
+  S.options = options;
+  return { kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
+           meta, attach, activity, orderbook };
+}
+
+function renderHeader(d) {
+  const active = S.periods.find(p => p.is_active) || {};
+  $("#period").textContent =
+    `${active.label ?? "–"} · ${dt(active.period_start)} to ${dt(active.period_end)}`
+    + ` · Hosur Road, Bengaluru`;
+  const run = d.meta.latest_load || {};
+  const manual = d.activity.length;
+  $("#prov").textContent =
+    `Source: ${run.source_file || "–"} · loaded ${dt(run.finished_at)}`
+    + (manual ? ` · ${manual} record${manual === 1 ? "" : "s"} entered since` : "");
+
+  const sel = $("#periodSel");
+  sel.innerHTML = S.periods.map(p =>
+    `<option value="${esc(p.label)}" ${p.is_active ? "selected" : ""}>${esc(p.label)}
+      — ${n0(p.bookings)} bookings</option>`).join("");
+}
+
+function render(d) {
+  const root = $("#root");
+  const scroll = window.scrollY;
+  root.innerHTML = "";
+  renderHeader(d);
+
+  const { kpi, funnel } = d;
+
+  /* ---- hero: bookings against target ---- */
+  const bTarget = funnel.stages.find(s => s.stage === "Bookings").target;
+  const bPct = bTarget ? (kpi.bookings / bTarget) * 100 : null;
+  const hero = document.createElement("div");
+  hero.className = "hero";
+  hero.innerHTML = `
+    <div>
+      <div class="hero-label">Bookings this month</div>
+      <div class="hero-fig">${n0(kpi.bookings)}<span class="hero-of"> / ${n0(bTarget)} target</span></div>
+    </div>
+    <div class="hero-meter">
+      <div class="meter"><i style="width:${Math.min(100, bPct || 0)}%;background:${severity(bPct)}"></i></div>
+      <div class="meter-cap"><span>${pct(bPct)} of target</span>
+        <span>${n0(Math.max(0, (bTarget || 0) - kpi.bookings))} short</span></div>
+    </div>`;
+  root.appendChild(hero);
+
+  /* ---- stat tiles ---- */
+  const rTarget = funnel.stages.find(s => s.stage === "Retails").target;
+  const tiles = [
+    { key: "enquiries", label: "Enquiries", value: n0(kpi.enquiries),
+      note: `${n0(kpi.qualified)} qualified` },
+    { key: "test_drives", label: "Test drives", value: n0(kpi.test_drives),
+      note: "scorecard baseline + entries" },
+    { key: "retails", label: "Retails", value: n0(kpi.retails),
+      note: `${n0(rTarget)} target · ${pct(rTarget ? kpi.retails / rTarget * 100 : null)}` },
+    { key: "enquiry_to_booking_pct", label: "Enquiry → booking",
+      value: pct(kpi.enquiry_to_booking_pct),
+      note: `booking → retail ${pct(kpi.booking_to_retail_pct)}` },
+    { key: "free_stock", label: "Free stock", value: n0(kpi.free_stock),
+      note: `${n0(kpi.allotted_stock)} allotted` },
+    { key: "stock_over_90_days", label: "Stock over 90 days",
+      value: n0(kpi.stock_over_90_days),
+      note: kpi.stock_over_90_days > 0 ? "carrying interest cost" : "clean",
+      alarm: kpi.stock_over_90_days > 0 },
+    { key: "backorders", label: "Back orders", value: n0(kpi.backorders),
+      note: "booked, no car allotted", alarm: kpi.backorders > 0 },
+    { key: "bookings_missing_crm_entry", label: "Not punched in CRM",
+      value: n0(kpi.bookings_missing_crm_entry),
+      note: "invisible to VW reporting", alarm: kpi.bookings_missing_crm_entry > 0 },
+    { key: "booking_amount_collected", label: "Booking amount",
+      value: money(kpi.booking_amount_collected), note: "collected this month" },
+    { key: "avg_allotment_tat_days", label: "Allotment TAT",
+      value: `${kpi.avg_allotment_tat_days ?? "–"} d`,
+      note: "avg days to retail an allotment" },
+  ];
+  const tw = document.createElement("div");
+  tw.className = "tiles";
+  tw.innerHTML = tiles.map(t => {
+    // Flash only the figures that actually moved, so a live update is legible.
+    const moved = S.prevKpi && String(S.prevKpi[t.key]) !== String(kpi[t.key]);
+    return `<div class="tile${moved ? " flash" : ""}"><div class="label">${esc(t.label)}</div>
+      <div class="value">${t.value}</div>
+      <div class="note${t.alarm ? " alarm" : ""}">${esc(t.note)}</div></div>`;
+  }).join("");
+  root.appendChild(tw);
+  S.prevKpi = { ...kpi };
+
+  /* ---- funnel + sources ---- */
+  const row1 = document.createElement("div");
+  row1.className = "grid g2";
+  const ramp = ["var(--o5)", "var(--o4)", "var(--o3)", "var(--o2)", "var(--o1)"];
+  row1.innerHTML =
+    panel("Sales funnel",
+      "Enquiry through to retail. The black tick is the month’s target where one is set.",
+      `<div id="c-funnel"></div><div class="datatable" id="t-funnel"></div>`) +
+    panel("Enquiries by channel",
+      `Where the month’s ${n0(kpi.enquiries)} enquiries came from, and how many qualified.`,
+      `<div id="c-src"></div><div class="datatable" id="t-src"></div>`);
+  root.appendChild(row1);
+
+  $("#c-funnel").appendChild(hbars(funnel.stages.map((s, i) => ({
+    label: s.stage, value: Number(s.value), target: s.target ? Number(s.target) : null,
+    colour: ramp[i],
+    tip: `<b>${esc(s.stage)}</b><br>Actual: <b>${n0(s.value)}</b>` +
+         (s.target ? `<br>Target: <b>${n0(s.target)}</b>` : ""),
+  })), { labelW: 92, width: 500 }));
+  $("#t-funnel").innerHTML = table(
+    [{ label: "Stage" }, { label: "Actual", num: true }, { label: "Target", num: true }],
+    funnel.stages, s => [esc(s.stage), n0(s.value), n0(s.target)]);
+
+  $("#c-src").appendChild(hbars(d.sources.map(s => ({
+    label: s.source, value: s.leads,
+    tip: `<b>${esc(s.source)}</b><br>Enquiries: <b>${n0(s.leads)}</b>` +
+         `<br>Qualified: <b>${n0(s.qualified)}</b> (${pct(s.qualified_pct)})` +
+         `<br>Channel: ${esc(s.channel)}`,
+  })), { labelW: 140, width: 500 }));
+  $("#t-src").innerHTML = table(
+    [{ label: "Source" }, { label: "Channel" }, { label: "Enquiries", num: true },
+     { label: "Qualified", num: true }, { label: "Qualified %", num: true }],
+    d.sources, s => [esc(s.source), esc(s.channel), n0(s.leads), n0(s.qualified),
+      pct(s.qualified_pct)]);
+
+  /* ---- consultant leaderboard ---- */
+  const lb = document.createElement("div");
+  lb.className = "grid";
+  lb.innerHTML = panel("Consultant scorecard",
+    "Bookings and retails against target, weakest booking gap first. The black tick is the target. " +
+    "Achievement is counted from the bookings and registrations in the database, so an entry moves it at once.",
+    legend([{ name: "Bookings", colour: "var(--s1)" },
+            { name: "Retails", colour: "var(--s3)" }]) +
+    `<div id="c-board"></div><div class="datatable" id="t-board"></div>`);
+  root.appendChild(lb);
+
+  $("#c-board").appendChild(groupedBars(d.board.map(r => ({
+    label: r.consultant,
+    values:  [Number(r.booking_achieved || 0), Number(r.retail_achieved || 0)],
+    targets: [Number(r.booking_target || 0),   Number(r.retail_target || 0)],
+    tips: [
+      `<b>${esc(r.consultant)}</b><br>Bookings: <b>${n0(r.booking_achieved)}</b> of ${n0(r.booking_target)}` +
+      `<br>${pct(r.booking_vs_target_pct)} of target · gap ${n0(r.booking_gap)}`,
+      `<b>${esc(r.consultant)}</b><br>Retails: <b>${n0(r.retail_achieved)}</b> of ${n0(r.retail_target)}` +
+      `<br>${pct(r.retail_vs_target_pct)} of target`,
+    ],
+  })), [{ name: "Bookings", colour: "var(--s1)" },
+        { name: "Retails", colour: "var(--s3)" }],
+    { barH: 12 }));
+
+  $("#t-board").innerHTML = table(
+    [{ label: "Consultant" }, { label: "Team" }, { label: "Channel" },
+     { label: "Enquiries", num: true }, { label: "TDs", num: true },
+     { label: "Bookings", num: true }, { label: "Bkg target", num: true },
+     { label: "Bkg %", num: true }, { label: "Retails", num: true },
+     { label: "Rtl target", num: true }, { label: "Conv %", num: true }],
+    d.board, r => [esc(r.consultant), esc(title(r.team || "–")),
+      esc(title(r.primary_channel || "–")),
+      n0(r.total_leads), n0(r.td_achieved), n0(r.booking_achieved), n0(r.booking_target),
+      pct(r.booking_vs_target_pct), n0(r.retail_achieved), n0(r.retail_target),
+      pct(r.booking_conv_pct)]);
+
+  /* ---- stock ageing + model position ---- */
+  const row2 = document.createElement("div");
+  row2.className = "grid g2";
+  row2.innerHTML =
+    panel("Stock ageing", "Free and allotted units by days since VW billed them. Anything past 90 days carries real interest cost.",
+      `<div id="lg-age"></div><div id="c-age"></div><div class="datatable" id="t-age"></div>`) +
+    panel("Model position", "Stock on the ground against the order book, per model.",
+      legend([{ name: "Free stock", colour: "var(--s1)" },
+              { name: "Bookings", colour: "var(--s2)" },
+              { name: "Back orders", colour: "var(--s3)" }]) +
+      `<div id="c-model"></div><div class="datatable" id="t-model"></div>`);
+  root.appendChild(row2);
+
+  const buckets = ["0-30", "31-60", "61-90", "91-180", "180+"];
+  const segs = buckets.map((b, i) => ({ name: b, colour: ramp[4 - i] }));
+  $("#lg-age").innerHTML = legend(segs);
+  const byModel = {};
+  d.ageing.forEach(a => { (byModel[a.model] ||= {})[a.ageing_bucket] = Number(a.units); });
+  const ageCats = Object.entries(byModel).map(([model, b]) => ({
+    label: model, values: buckets.map(k => b[k] || 0),
+  })).sort((a, b) => b.values.reduce((x, y) => x + y, 0) - a.values.reduce((x, y) => x + y, 0));
+  $("#c-age").appendChild(stackedBars(ageCats, segs, { width: 500 }));
+  $("#t-age").innerHTML = table(
+    [{ label: "Model" }, { label: "Bucket" }, { label: "Units", num: true },
+     { label: "Avg days", num: true }, { label: "Max days", num: true }],
+    d.ageing, a => [esc(a.model), esc(a.ageing_bucket), n0(a.units), n0(a.avg_days),
+      n0(a.max_days)]);
+
+  $("#c-model").appendChild(groupedBars(d.models.map(m => ({
+    label: title(m.model),
+    values: [Number(m.free_stock), Number(m.bookings_this_period),
+             Number(m.backorders_this_period)],
+    tips: [
+      `<b>${esc(title(m.model))}</b><br>Free stock: <b>${n0(m.free_stock)}</b><br>Allotted: ${n0(m.allotted_stock)}`,
+      `<b>${esc(title(m.model))}</b><br>Bookings this month: <b>${n0(m.bookings_this_period)}</b>`,
+      `<b>${esc(title(m.model))}</b><br>Back orders: <b>${n0(m.backorders_this_period)}</b><br>Registered: ${n0(m.registered)}`,
+    ],
+  })), [{ name: "Free stock", colour: "var(--s1)" },
+        { name: "Bookings", colour: "var(--s2)" },
+        { name: "Back orders", colour: "var(--s3)" }],
+    { width: 500, labelW: 96 }));
+  $("#t-model").innerHTML = table(
+    [{ label: "Model" }, { label: "Free", num: true }, { label: "Allotted", num: true },
+     { label: "Total stock", num: true }, { label: "Bookings", num: true },
+     { label: "Back orders", num: true }, { label: "Registered", num: true }],
+    d.models, m => [esc(title(m.model)), n0(m.free_stock), n0(m.allotted_stock),
+      n0(m.total_stock), n0(m.bookings_this_period), n0(m.backorders_this_period),
+      n0(m.registered)]);
+
+  /* ---- order book: the editable panel ---- */
+  const ob = document.createElement("div");
+  ob.className = "grid";
+  ob.innerHTML = panel("Order book",
+    "This month’s bookings. Change a status or tick the CRM box and it is written to the database immediately.",
+    table([{ label: "Customer" }, { label: "Car" }, { label: "Colour" },
+           { label: "Consultant" }, { label: "Booked" }, { label: "Status" },
+           { label: "In CRM" }, { label: "Amount", num: true }, { label: "" }],
+      d.orderbook, b => [
+        esc(b.customer_name),
+        esc(carName(b.model, b.variant)),
+        esc(b.colour || "–"),
+        esc(b.consultant || "–"),
+        dt(b.booking_date),
+        `<select data-booking="${b.booking_id}" data-field="fulfilment_status">
+          ${["BOOKED", "NO_STOCK", "ALLOTED", "RETAILED", "CANCELLED"].map(s =>
+            `<option ${s === b.fulfilment_status ? "selected" : ""}>${s}</option>`).join("")}
+         </select>`,
+        `<input type="checkbox" data-booking="${b.booking_id}" data-field="crm_entry_done"
+                ${b.crm_entry_done ? "checked" : ""}>`,
+        b.booking_amount == null ? "–" : money(b.booking_amount),
+        b.source_sheet === "Dashboard entry" ? `<span class="tag">entered</span>` : "",
+      ]));
+  root.appendChild(ob);
+
+  /* ---- action lists ---- */
+  const row3 = document.createElement("div");
+  row3.className = "grid g2";
+  row3.innerHTML =
+    panel("Back orders", "Customers who have booked with no car against their name. Longest wait first.",
+      table([{ label: "Customer" }, { label: "Car" }, { label: "Colour" },
+             { label: "Consultant" }, { label: "Waiting", num: true }, { label: "Can fill?" }],
+        d.backorders, b => [esc(b.customer_name), esc(carName(b.model, b.variant)),
+          esc(b.colour || "–"), esc(b.consultant || "–"),
+          b.days_waiting != null ? b.days_waiting + " d" : "–",
+          b.matching_free_units > 0
+            ? `<span class="pill" style="color:var(--good-text)">${b.matching_free_units} in stock</span>`
+            : `<span class="pill">no match</span>`])) +
+    panel("Stock past its VW retail deadline",
+      "Free units whose NADCON retail date has already gone by. These are the first thing VW asks about.",
+      table([{ label: "Chassis" }, { label: "Car" }, { label: "Colour" },
+             { label: "Age", num: true }, { label: "Deadline" }],
+        d.actions.stock_past_retail_deadline, s => [
+          `<code>${esc(s.chassis_number)}</code>`, esc(carName(s.model, s.variant)),
+          esc(s.colour || "–"), n0(s.stock_aging_days) + " d", dt(s.nadcon_retail_date)]));
+  root.appendChild(row3);
+
+  /* ---- crm gap + recent activity ---- */
+  const row4 = document.createElement("div");
+  row4.className = "grid g2";
+  row4.innerHTML =
+    panel("Bookings not punched into the CRM",
+      "Sold, but absent from VW-side reporting until someone enters them.",
+      table([{ label: "Customer" }, { label: "Car" }, { label: "Consultant" }, { label: "Booked" }],
+        d.actions.bookings_missing_crm_entry, b => [esc(b.customer_name),
+          esc(carName(b.model, b.variant)), esc(b.consultant || "–"),
+          dt(b.booking_date)])) +
+    panel("Entered here",
+      "Records added through this dashboard rather than the workbook. These survive a workbook reload; workbook rows cannot be deleted here.",
+      table([{ label: "What" }, { label: "Who" }, { label: "By" }, { label: "When" }, { label: "" }],
+        d.activity, a => [
+          `<span class="tag">${esc(a.kind)}</span>`,
+          esc(title(a.who || "–")), esc(a.entered_by || "–"),
+          new Date(a.loaded_at).toLocaleString("en-IN",
+            { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }),
+          `<button class="danger" data-del="${esc(a.kind.replace(" ", "-"))}s"
+                   data-id="${a.id}">Delete</button>`]));
+  root.appendChild(row4);
+
+  /* ---- data quality ---- */
+  const sevColour = { high: "var(--critical)", medium: "var(--warning)", low: "var(--ink-muted)" };
+  const dqPanel = document.createElement("div");
+  dqPanel.className = "grid";
+  dqPanel.innerHTML = panel("Data quality",
+    "Disagreements between the workbook’s tabs, found while loading. Surfaced rather than quietly resolved — some tabs genuinely do not match the rows they summarise.",
+    d.dq.map(x => `<div class="dq">
+        <i class="sev" style="background:${sevColour[x.severity] || "var(--ink-muted)"}"></i>
+        <div><div class="issue">${esc(x.issue)}</div>
+             <div class="detail">${esc(x.detail)}</div></div>
+        <div class="count">${esc(x.affected_rows)} rows</div></div>`).join("")
+    || `<p class="hint">No discrepancies found.</p>`);
+  root.appendChild(dqPanel);
+
+  window.scrollTo({ top: scroll });
+}
+
+/* ---- inline edits from the order book ---- */
+document.addEventListener("change", async e => {
+  const el = e.target;
+  const id = el.dataset.booking;
+  if (!id) return;
+  const field = el.dataset.field;
+  const value = el.type === "checkbox" ? el.checked : el.value;
+  try {
+    await send("PATCH", `/api/bookings/${id}`, { [field]: value });
+    toast(`Booking ${id} updated.`);
+  } catch (err) {
+    toast(err.message, { bad: true });
+    refresh();
+  }
+});
+
+document.addEventListener("click", async e => {
+  const btn = e.target.closest("[data-del]");
+  if (!btn) return;
+  const { del, id } = btn.dataset;
+  try {
+    await send("DELETE", `/api/entries/${del}/${id}`);
+    toast("Deleted.");
+  } catch (err) {
+    toast(err.message, { bad: true });
+  }
+});
+
+/* =================================================================
+   Entry forms
+   ================================================================= */
+function activePeriod() {
+  return S.periods.find(p => p.is_active) || {};
+}
+
+/**
+ * The date an entry should default to.
+ *
+ * Today, unless today falls outside the month being reported on - in which case
+ * the last day of that month, so an entry made while reviewing a closed month
+ * lands where the person is looking. The field is always visible and editable,
+ * and the form says which month the entry will be filed under.
+ */
+function defaultDate() {
+  const p = activePeriod();
+  const today = iso(new Date());
+  if (!p.period_start) return today;
+  if (today >= p.period_start && today <= p.period_end) return today;
+  return p.period_end;
+}
+
+const listOf = (id, values) =>
+  `<datalist id="${id}">${values.map(v => `<option>${esc(v)}</option>`).join("")}</datalist>`;
+
+function textField(name, label, opts = {}) {
+  const { hint = "", list, type = "text", value = "", required = false,
+          placeholder = "" } = opts;
+  return `<label class="field"><span>${esc(label)}${
+      required ? "" : " <em>optional</em>"}${hint ? ` <em>· ${esc(hint)}</em>` : ""}</span>
+    <input name="${name}" type="${type}" value="${esc(value)}"
+      placeholder="${esc(placeholder)}" ${list ? `list="${list}"` : ""}
+      ${required ? "required" : ""}></label>`;
+}
+
+function selectField(name, label, values, opts = {}) {
+  const { value = "", required = false } = opts;
+  return `<label class="field"><span>${esc(label)}${required ? "" : " <em>optional</em>"}</span>
+    <select name="${name}" ${required ? "required" : ""}>
+      ${required ? "" : `<option value=""></option>`}
+      ${values.map(v => `<option ${v === value ? "selected" : ""}>${esc(v)}</option>`).join("")}
+    </select></label>`;
+}
+
+const FORMS = {
+  lead: {
+    label: "Enquiry",
+    blurb: "A walk-in, a call, a web enquiry. Counts toward enquiries at once.",
+    path: "/api/leads",
+    dateField: "created_on",
+    build: o => `
+      ${textField("lead_name", "Customer name", { required: true, placeholder: "Ramesh Iyer" })}
+      <div class="row2">
+        ${selectField("source", "Source", o.sources, { required: true })}
+        ${selectField("consultant", "Consultant", o.consultants)}
+      </div>
+      <div class="row2">
+        ${textField("mobile", "Mobile", { placeholder: "9845012345" })}
+        ${selectField("rating", "Rating", ["Hot", "Warm", "Cold"])}
+      </div>
+      ${textField("model_of_interest", "Model of interest",
+                  { list: "dl-longmodel", placeholder: "VIRTUS 1.0L TSI 85kW AT GT Line" })}
+      ${textField("email", "Email", { type: "email" })}
+      ${textField("created_on", "Enquiry date", { type: "date", value: defaultDate(), required: true })}
+      <label class="field"><span>Qualified</span>
+        <select name="qualified"><option value="true" selected>Yes</option>
+        <option value="false">No</option></select></label>`,
+  },
+  booking: {
+    label: "Booking",
+    blurb: "A confirmed order. Moves the hero figure, the funnel and the consultant’s scorecard.",
+    path: "/api/bookings",
+    dateField: "booking_date",
+    build: o => `
+      ${textField("customer_name", "Customer name", { required: true })}
+      <div class="row2">
+        ${selectField("consultant", "Consultant", o.consultants, { required: true })}
+        ${selectField("source", "Source", o.sources, { required: true })}
+      </div>
+      <div class="row2">
+        ${selectField("model", "Model", o.models, { required: true })}
+        ${textField("variant", "Variant", { list: "dl-variant", placeholder: "GT LINE AT" })}
+      </div>
+      <div class="row2">
+        ${textField("colour", "Colour", { list: "dl-colour" })}
+        ${textField("mobile", "Mobile")}
+      </div>
+      <div class="row2">
+        ${textField("booking_amount", "Booking amount ₹", { type: "number" })}
+        ${textField("model_year", "Model year", { type: "number", value: new Date().getFullYear() })}
+      </div>
+      <div class="row2">
+        ${selectField("fulfilment_status", "Status",
+            ["BOOKED", "NO_STOCK", "ALLOTED", "RETAILED"], { value: "BOOKED", required: true })}
+        ${selectField("car_origin", "Car", ["FRESH CAR", "PUNCHED CAR"])}
+      </div>
+      ${textField("booking_date", "Booking date", { type: "date", value: defaultDate(), required: true })}
+      <label class="field"><span>Punched into the CRM</span>
+        <select name="crm_entry_done"><option value="">not set</option>
+        <option value="true">Yes</option><option value="false">No</option></select></label>
+      <label class="field"><span>Notes <em>optional</em></span>
+        <textarea name="notes"></textarea></label>`,
+  },
+  testdrive: {
+    label: "Test drive",
+    blurb: "A drive given. Adds to the test-drive count on top of the scorecard baseline.",
+    path: "/api/test-drives",
+    dateField: "td_date",
+    build: o => `
+      ${textField("lead_name", "Customer name", { required: true })}
+      <div class="row2">
+        ${selectField("consultant", "Consultant", o.consultants)}
+        ${selectField("source", "Source", o.sources)}
+      </div>
+      ${textField("model_of_interest", "Model driven", { list: "dl-longmodel" })}
+      ${textField("mobile", "Mobile")}
+      <div class="row2">
+        ${textField("start_km", "Start km", { type: "number" })}
+        ${textField("end_km", "End km", { type: "number" })}
+      </div>
+      ${textField("td_date", "Date", { type: "date", value: defaultDate(), required: true })}`,
+  },
+  vehicle: {
+    label: "Stock",
+    blurb: "A car arriving on the floor. Chassis number is the identity — entering the same one again updates it.",
+    path: "/api/vehicles",
+    build: o => `
+      ${textField("chassis_number", "Chassis number", { required: true, placeholder: "MEXA26D21TT022886" })}
+      <div class="row2">
+        ${selectField("model", "Model", o.models, { required: true })}
+        ${textField("variant", "Variant", { list: "dl-variant" })}
+      </div>
+      <div class="row2">
+        ${textField("colour", "Colour", { list: "dl-colour" })}
+        ${textField("engine_number", "Engine number")}
+      </div>
+      <div class="row2">
+        ${textField("commission_no", "Commission no")}
+        ${textField("model_year", "Model year", { type: "number", value: new Date().getFullYear() })}
+      </div>
+      <div class="row2">
+        ${textField("billing_date", "VW billing date", { type: "date", hint: "sets ageing" })}
+        ${textField("stock_received_date", "Received on", { type: "date" })}
+      </div>
+      <div class="row2">
+        ${selectField("stock_status", "Status", ["FREESTOCK", "ALLOTED", "RETAILED"],
+            { value: "FREESTOCK", required: true })}
+        ${textField("nadcon_retail_date", "Retail deadline", { type: "date" })}
+      </div>`,
+  },
+  allotment: {
+    label: "Allot",
+    blurb: "Give a car to a customer who has booked. Links the booking to the chassis and moves both to allotted.",
+    path: "/api/allotments",
+    dateField: "allotted_date",
+    build: o => `
+      <label class="field"><span>Booking</span>
+        <select name="booking_id" required>
+          ${o.open_bookings.map(b =>
+            `<option value="${b.booking_id}">${esc(b.customer_name)} — ${
+              esc(carName(b.model, b.variant))}${b.consultant ? " · " + esc(b.consultant) : ""}</option>`
+          ).join("") || `<option value="">no open bookings</option>`}
+        </select></label>
+      <label class="field"><span>Car from free stock</span>
+        <select name="chassis_number" required>
+          ${o.free_chassis.map(c =>
+            `<option value="${esc(c.chassis_number)}">${esc(c.chassis_number)} — ${
+              esc(carName(c.model, c.variant))} · ${esc(c.colour || "?")} · ${
+              c.stock_aging_days ?? "?"} d</option>`).join("")}
+        </select></label>
+      ${textField("allotted_date", "Allotted on", { type: "date", value: defaultDate(), required: true })}
+      <label class="field"><span>Remarks <em>optional</em></span>
+        <textarea name="remarks"></textarea></label>`,
+  },
+  registration: {
+    label: "Retail",
+    blurb: "A delivered car. Counts as a retail and moves the unit to registered.",
+    path: "/api/registrations",
+    build: o => `
+      ${textField("customer_name", "Customer name", { required: true })}
+      <label class="field"><span>Chassis <em>optional · links the car</em></span>
+        <select name="chassis_number"><option value=""></option>
+          ${o.free_chassis.map(c =>
+            `<option value="${esc(c.chassis_number)}">${esc(c.chassis_number)} — ${
+              esc(carName(c.model, c.variant))}</option>`).join("")}
+        </select></label>
+      <div class="row2">
+        ${selectField("consultant", "Consultant", o.consultants)}
+        ${selectField("source", "Source", o.sources)}
+      </div>
+      <div class="row2">
+        ${textField("registration_no", "Registration no", { placeholder: "KA01AB1234" })}
+        ${textField("registration_date", "Registered on", { type: "date" })}
+      </div>
+      <div class="row2">
+        ${textField("invoice_date", "Invoiced on", { type: "date" })}
+        ${textField("delivery_date", "Delivered on", { type: "date" })}
+      </div>
+      <div class="row2">
+        ${selectField("finance_type", "Finance", ["YES", "FULL CASH", "OH", "LEASING"])}
+        ${textField("bank", "Bank")}
+      </div>
+      <div class="row2">
+        ${selectField("has_insurance", "Insurance", ["true", "false"])}
+        ${selectField("has_extended_warranty", "Extended warranty", ["true", "false"])}
+      </div>
+      <div class="row2">
+        ${selectField("has_service_value_package", "Service package", ["true", "false"])}
+        ${selectField("is_corporate", "Corporate deal", ["true", "false"])}
+      </div>
+      <div class="row2">
+        ${textField("accessories", "Accessories ₹", { type: "number" })}
+        ${textField("elite_discount", "Elite discount ₹", { type: "number" })}
+      </div>
+      ${textField("vw_offers", "VW offers", { placeholder: "VW-40K, EXCH-20K, LOY-40K" })}`,
+  },
+};
+
+let currentForm = "booking";
+
+function openDrawer(which = currentForm) {
+  currentForm = which;
+  const o = S.options;
+  const f = FORMS[which];
+  const p = activePeriod();
+  const today = iso(new Date());
+  const outside = p.period_start && (today < p.period_start || today > p.period_end);
+
+  $("#tabs").innerHTML = Object.entries(FORMS).map(([k, v]) =>
+    `<button role="tab" data-form="${k}" aria-selected="${k === which}">${esc(v.label)}</button>`
+  ).join("");
+  $("#drawerSub").textContent = f.blurb;
+
+  const longModels = [...new Set(o.variants.map(v => v.long_model_text).filter(Boolean))];
+  $("#formHost").innerHTML =
+    (f.dateField && outside
+      ? `<div class="note-box">Today is <b>${dt(today)}</b>, outside the month on screen
+          (<b>${esc(p.label)}</b>). The date below defaults to the last day of
+          ${esc(p.label)} so this entry appears in the figures you are looking at —
+          change it to today if you would rather file it under the current month.</div>`
+      : "") +
+    `<p class="err" id="formErr" hidden></p>` +
+    f.build(o) +
+    textField("entered_by", "Entered by", { value: localStorage.getItem("dsr.who") || "" }) +
+    listOf("dl-variant", [...new Set(o.variants.map(v => v.variant))]) +
+    listOf("dl-colour", o.colours) +
+    listOf("dl-longmodel", longModels);
+
+  document.body.classList.add("drawer");
+  $("#drawer").setAttribute("aria-hidden", "false");
+  const first = $("#formHost input, #formHost select");
+  if (first) first.focus();
+}
+
+function closeDrawer() {
+  document.body.classList.remove("drawer");
+  $("#drawer").setAttribute("aria-hidden", "true");
+  $("#addBtn").focus();
+}
+
+async function saveForm() {
+  const f = FORMS[currentForm];
+  const host = $("#formHost");
+  const err = $("#formErr");
+  err.hidden = true;
+
+  const body = {};
+  host.querySelectorAll("[name]").forEach(el => {
+    const v = el.value;
+    if (v === "" || v == null) return;
+    if (v === "true" || v === "false") { body[el.name] = v === "true"; return; }
+    if (el.type === "number") { body[el.name] = Number(v); return; }
+    body[el.name] = v;
+  });
+  for (const el of host.querySelectorAll("[required]")) {
+    if (!el.value) {
+      err.textContent = "Fill in every required field.";
+      err.hidden = false;
+      el.focus();
+      return;
+    }
+  }
+  if (body.entered_by) localStorage.setItem("dsr.who", body.entered_by);
+
+  $("#saveBtn").disabled = true;
+  try {
+    const res = await send("POST", f.path, body);
+    // If the row was filed under a month other than the one on screen, say so
+    // and offer to go there - otherwise the figures look like they ignored it.
+    if (res && res.in_active_period === false && res.period) {
+      toast(`Saved under ${res.period}, not the month on screen.`, {
+        action: { label: `View ${res.period}`, run: () => switchPeriod(res.period) },
+      });
+    } else {
+      toast(`${f.label} saved.`);
+    }
+    openDrawer(currentForm);      // fresh form, ready for the next one
+  } catch (e2) {
+    err.textContent = e2.message;
+    err.hidden = false;
+  } finally {
+    $("#saveBtn").disabled = false;
+  }
+}
+
+async function switchPeriod(label) {
+  try {
+    await send("POST", `/api/period/${encodeURIComponent(label)}/activate`);
+    toast(`Now showing ${label}.`);
+  } catch (e) {
+    toast(e.message, { bad: true });
+  }
+}
+
+/* =================================================================
+   Live updates
+   ================================================================= */
+let refreshTimer = null;
+
+async function refresh() {
+  try {
+    const d = await fetchAll();
+    render(d);
+  } catch (e) {
+    console.error(e);
+    toast("Could not refresh: " + e.message, { bad: true });
+  }
+}
+
+function scheduleRefresh() {
+  // A single write can touch several tables; the server already coalesces, and
+  // this second, shorter debounce covers a burst of separate writes.
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 250);
+}
+
+function setLive(state, text) {
+  $("#liveDot").dataset.state = state;
+  $("#liveText").textContent = text;
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("ready", () => setLive("live", "live"));
+  es.addEventListener("change", ev => {
+    let tables = [];
+    try { tables = JSON.parse(ev.data).tables || []; } catch {}
+    setLive("live", tables.length ? `updated · ${tables.length} table${
+      tables.length === 1 ? "" : "s"}` : "updated");
+    scheduleRefresh();
+    setTimeout(() => setLive("live", "live"), 2500);
+  });
+  es.onerror = () => {
+    // EventSource reconnects on its own; just reflect the state.
+    setLive("down", "reconnecting");
+  };
+  es.onopen = () => setLive("live", "live");
+}
+
+/* ---- controls ---- */
+$("#tbtn").addEventListener("click", e => {
+  const on = document.body.classList.toggle("tables");
+  e.target.setAttribute("aria-pressed", String(on));
+  e.target.textContent = on ? "Hide data tables" : "Show data tables";
+});
+$("#theme").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? null : "dark";
+  if (next) document.documentElement.setAttribute("data-theme", next);
+  else document.documentElement.removeAttribute("data-theme");
+});
+$("#addBtn").addEventListener("click", () => openDrawer());
+$("#closeBtn").addEventListener("click", closeDrawer);
+$("#cancelBtn").addEventListener("click", closeDrawer);
+$("#scrim").addEventListener("click", closeDrawer);
+$("#saveBtn").addEventListener("click", saveForm);
+$("#tabs").addEventListener("click", e => {
+  const b = e.target.closest("[data-form]");
+  if (b) openDrawer(b.dataset.form);
+});
+$("#periodSel").addEventListener("change", e => switchPeriod(e.target.value));
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.body.classList.contains("drawer")) closeDrawer();
+  // Ctrl/Cmd+Enter saves, so a run of entries never needs the mouse.
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"
+      && document.body.classList.contains("drawer")) saveForm();
+});
+
+/* ---- go ---- */
+refresh().then(connect).catch(err => {
+  $("#root").innerHTML =
+    `<div class="panel"><h2>Could not load the dashboard</h2>
+     <p class="hint">${esc(err.message)}</p>
+     <p class="hint">Is PostgreSQL running, and has <code>python -m etl.load_dsr</code> been run?</p></div>`;
+  console.error(err);
+});
+</script>
+</body>
+</html>
