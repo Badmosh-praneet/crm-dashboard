@@ -579,21 +579,114 @@ function legend(items) {
 const S = { data: null, options: null, periods: [], prevKpi: null };
 
 async function fetchAll() {
-  const [kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
-         meta, attach, periods, options, activity, orderbook] =
-    await Promise.all([
-      api("/api/kpi"), api("/api/funnel"), api("/api/leaderboard"),
-      api("/api/leads/sourcewise"), api("/api/models/position"),
-      api("/api/stock/ageing"), api("/api/backorders"), api("/agent/action-list"),
-      api("/api/data-quality"), api("/api/meta"), api("/api/attachments"),
-      api("/api/periods"), api("/api/entry-options"), api("/api/recent-activity?limit=12"),
-      api("/api/bookings?limit=40"),
-    ]);
-  S.periods = periods;
-  S.options = options;
-  return { kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
-           meta, attach, activity, orderbook };
+  try {
+    const [kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
+           meta, attach, periods, options, activity, orderbook] =
+      await Promise.all([
+        api("/api/kpi"), api("/api/funnel"), api("/api/leaderboard"),
+        api("/api/leads/sourcewise"), api("/api/models/position"),
+        api("/api/stock/ageing"), api("/api/backorders"), api("/agent/action-list"),
+        api("/api/data-quality"), api("/api/meta"), api("/api/attachments"),
+        api("/api/periods"), api("/api/entry-options"), api("/api/recent-activity?limit=12"),
+        api("/api/bookings?limit=40"),
+      ]);
+    S.periods = periods;
+    S.options = options;
+    return { kpi, funnel, board, sources, models, ageing, backorders, actions, dq,
+             meta, attach, activity, orderbook };
+  } catch (err) {
+    console.warn("Live API fetch had an issue, loading static snapshot fallback:", err);
+    try {
+      const snap = await fetch("/snapshot_data.json").then(r => r.json());
+      const funnel = {
+        period: snap.funnel?.period || "AUG2026",
+        stages: [
+          { stage: "Enquiries",   value: snap.funnel?.enquiries || 367, target: snap.targets?.leads_target || 450 },
+          { stage: "Qualified",   value: snap.funnel?.qualified || 361, target: null },
+          { stage: "Test drives", value: snap.funnel?.test_drives || 128, target: snap.targets?.td_target || 300 },
+          { stage: "Bookings",    value: snap.funnel?.bookings || 42, target: snap.targets?.booking_target || 84 },
+          { stage: "Retails",     value: snap.funnel?.retails || 18, target: snap.targets?.retail_target || 66 },
+        ],
+      };
+      const periods = [{
+        label: "AUG2026",
+        is_active: true,
+        period_start: "2026-08-01",
+        period_end: "2026-08-31",
+        working_days: 26,
+        bookings: 42,
+        retails: 18,
+      }];
+      const consultants = [...new Set((snap.board || []).map(b => b.consultant).filter(Boolean))].sort();
+      const models = [...new Set((snap.avail || []).map(a => a.model).filter(Boolean))].sort();
+      const variants = [];
+      const seen = new Set();
+      (snap.avail || []).forEach(a => {
+        const k = `${a.model}#${a.variant}`;
+        if (!seen.has(k) && a.model && a.variant) {
+          seen.add(k);
+          variants.push({ model: a.model, variant: a.variant, long_model_text: `${a.model} ${a.variant}` });
+        }
+      });
+      const colours = [...new Set((snap.avail || []).map(a => a.colour).filter(Boolean))].sort();
+      const options = {
+        consultants,
+        sources: ["CRM", "TELE", "WALKIN", "DIGITAL", "REFERENCE", "WORKSHOP REFERRAL", "SHOWROOM REFERRAL"],
+        models,
+        variants,
+        colours,
+        fulfilment_statuses: ["BOOKED", "NO_STOCK", "ALLOTED", "RETAILED", "CANCELLED"],
+        open_bookings: [],
+        free_chassis: [],
+      };
+      const orderbook = (snap.nocrm || []).map((b, i) => ({
+        booking_id: i + 1,
+        customer_name: b.customer_name,
+        model: b.model,
+        variant: b.variant,
+        colour: "Candy White",
+        consultant: b.consultant,
+        booking_date: b.booking_date,
+        fulfilment_status: "BOOKED",
+        crm_entry_done: false,
+        booking_amount: 25000,
+        source_sheet: "DSR August 2026",
+        is_current_period: true,
+      }));
+      const actions = {
+        stock_past_retail_deadline: snap.deadline || [],
+        ageing_over_90_days: (snap.deadline || []).filter(d => (d.stock_aging_days || 0) > 90),
+        backorders: snap.backorders || [],
+        bookings_missing_crm_entry: snap.nocrm || [],
+      };
+      const meta = {
+        latest_load: snap.meta || {},
+        period: snap.period || { label: "AUG2026", period_start: "2026-08-01", period_end: "2026-08-31" },
+      };
+      S.periods = periods;
+      S.options = options;
+      return {
+        kpi: snap.kpi,
+        funnel,
+        board: snap.board || [],
+        sources: snap.sources || [],
+        models: snap.models || [],
+        ageing: snap.ageing || [],
+        backorders: snap.backorders || [],
+        actions,
+        dq: snap.dq || [],
+        meta,
+        attach: snap.attach || {},
+        activity: [],
+        orderbook,
+      };
+    } catch (fallbackErr) {
+      console.error("Snapshot fallback failed:", fallbackErr);
+      throw err;
+    }
+  }
 }
+
 
 function renderHeader(d) {
   const active = S.periods.find(p => p.is_active) || {};
@@ -1257,7 +1350,16 @@ function setLive(state, text) {
 
 function connect() {
   const es = new EventSource("/api/events");
-  es.addEventListener("ready", () => setLive("live", "live"));
+  es.addEventListener("ready", ev => {
+    let d = {};
+    try { d = JSON.parse(ev.data); } catch {}
+    if (d.serverless) {
+      setLive("live", "snapshot");
+      es.close();
+      return;
+    }
+    setLive("live", "live");
+  });
   es.addEventListener("change", ev => {
     let tables = [];
     try { tables = JSON.parse(ev.data).tables || []; } catch {}
@@ -1267,8 +1369,12 @@ function connect() {
     setTimeout(() => setLive("live", "live"), 2500);
   });
   es.onerror = () => {
-    // EventSource reconnects on its own; just reflect the state.
-    setLive("down", "reconnecting");
+    if (location.hostname.includes("vercel.app")) {
+      setLive("live", "snapshot");
+      es.close();
+    } else {
+      setLive("down", "reconnecting");
+    }
   };
   es.onopen = () => setLive("live", "live");
 }

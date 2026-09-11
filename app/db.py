@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -11,12 +12,11 @@ from psycopg_pool import ConnectionPool
 
 log = logging.getLogger("dsr.db")
 
-DSN = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@127.0.0.1:5432/elite_dsr",
-)
-if DSN.startswith("postgres://"):
-    DSN = "postgresql://" + DSN[len("postgres://"):]
+_raw_dsn = os.environ.get("DATABASE_URL", "")
+if _raw_dsn.startswith("postgres://"):
+    _raw_dsn = "postgresql://" + _raw_dsn[len("postgres://"):]
+
+DSN = _raw_dsn or "postgresql://postgres:postgres@127.0.0.1:5432/elite_dsr"
 
 # Every query in this app runs against the dsr schema, so the search path is set
 # once on connection rather than repeated in each statement.
@@ -30,31 +30,51 @@ pool = ConnectionPool(
 )
 
 _db_ready: bool = False
+_last_check_time: float = 0.0
 
 
-def check_db() -> bool:
-    global _db_ready
+def has_database() -> bool:
+    """Return True only if a valid non-local DATABASE_URL was supplied in environment."""
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return False
+    # If running in Vercel and URL points to 127.0.0.1 or localhost, no local database exists!
+    if os.environ.get("VERCEL") and ("127.0.0.1" in url or "localhost" in url):
+        return False
+    return True
+
+
+def is_db_ready() -> bool:
+    """Fast check with 30s failure caching so requests never hang on unreachable DB."""
+    global _db_ready, _last_check_time
+    if not has_database():
+        return False
+    now = time.time()
+    if not _db_ready and (now - _last_check_time) < 30.0:
+        return False
+    _last_check_time = now
     try:
-        with pool.connection(timeout=2.0) as cx:
+        with pool.connection(timeout=1.0) as cx:
             cx.execute("SELECT 1")
             _db_ready = True
             return True
-    except Exception:
+    except Exception as exc:
+        log.warning("Database ping failed: %s", exc)
         _db_ready = False
         return False
 
 
-def is_db_ready() -> bool:
-    return _db_ready
+def check_db() -> bool:
+    return is_db_ready()
 
 
 def fetch_all(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-    with pool.connection(timeout=3.0) as cx:
+    with pool.connection(timeout=2.0) as cx:
         return cx.execute(sql, params).fetchall()
 
 
 def fetch_one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
-    with pool.connection(timeout=3.0) as cx:
+    with pool.connection(timeout=2.0) as cx:
         return cx.execute(sql, params).fetchone()
 
 

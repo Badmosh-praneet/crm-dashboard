@@ -1,25 +1,12 @@
 """Fallback data provider when PostgreSQL is offline or unconfigured."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
-
-DATA_FILE = Path(__file__).resolve().parent / "snapshot_data.json"
-_SNAPSHOT: dict[str, Any] | None = None
+from .data_bundle import DATA
 
 
 def get_snapshot() -> dict[str, Any]:
-    global _SNAPSHOT
-    if _SNAPSHOT is None:
-        try:
-            if DATA_FILE.exists():
-                _SNAPSHOT = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-            else:
-                _SNAPSHOT = {}
-        except Exception:
-            _SNAPSHOT = {}
-    return _SNAPSHOT
+    return DATA
 
 
 def get_kpi() -> dict[str, Any]:
@@ -181,17 +168,20 @@ def get_entry_options() -> dict[str, Any]:
             })
     colours = sorted({r.get("colour") for r in avail if r.get("colour")})
     return {
-        "consultants": [{"name": c} for c in consultants],
-        "models": [{"name": m} for m in models],
+        "consultants": consultants,
+        "sources": ["CRM", "TELE", "WALKIN", "DIGITAL", "REFERENCE", "WORKSHOP REFERRAL", "SHOWROOM REFERRAL"],
+        "models": models,
         "variants": variants,
         "colours": colours,
+        "fulfilment_statuses": ["BOOKED", "NO_STOCK", "ALLOTED", "RETAILED", "CANCELLED"],
+        "open_bookings": [],
+        "free_chassis": [],
     }
 
 
 def get_bookings(limit: int = 40) -> list[dict[str, Any]]:
     snap = get_snapshot()
     nocrm = snap.get("nocrm", [])
-    # Format similarly to v_bookings orderbook view
     res = []
     for i, b in enumerate(nocrm[:limit], start=1):
         res.append({
