@@ -68,9 +68,32 @@ def main():
                 views_sql = (ROOT / "db" / "views.sql").read_text(encoding="utf-8")
                 cur.execute(views_sql)
 
+                # Grant permissions to Supabase roles if present
+                try:
+                    cur.execute("""
+                        DO $$
+                        BEGIN
+                            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                                GRANT USAGE ON SCHEMA dsr TO anon, authenticated, service_role;
+                                GRANT ALL ON ALL TABLES IN SCHEMA dsr TO anon, authenticated, service_role;
+                                GRANT ALL ON ALL SEQUENCES IN SCHEMA dsr TO anon, authenticated, service_role;
+                                GRANT ALL ON ALL ROUTINES IN SCHEMA dsr TO anon, authenticated, service_role;
+                                ALTER DEFAULT PRIVILEGES IN SCHEMA dsr GRANT ALL ON TABLES TO anon, authenticated, service_role;
+                            END IF;
+                        END
+                        $$;
+                    """)
+                except Exception:
+                    pass
+
                 cur.execute("SELECT count(*) FROM dsr.vehicle;")
                 count = cur.fetchone()[0]
-                print(f"\nAll set! Database initialized with {count} vehicles.")
+
+                # Update local .env file
+                env_path = ROOT / ".env"
+                env_path.write_text(f"DATABASE_URL={dsn}\n", encoding="utf-8")
+                print(f"\nUpdated .env with cloud DATABASE_URL.")
+                print(f"All set! Supabase database initialized with {count} vehicles.")
                 print("\nNext step: Add this DATABASE_URL to your Vercel Project Settings:")
                 print("  Vercel Dashboard -> Project -> Settings -> Environment Variables")
                 print("  Key: DATABASE_URL")

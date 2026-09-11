@@ -58,7 +58,7 @@ def is_db_ready() -> bool:
         return False
     _last_check_time = now
     try:
-        with pool.connection(timeout=1.0) as cx:
+        with pool.connection(timeout=10.0) as cx:
             cx.execute("SELECT 1")
             _db_ready = True
             return True
@@ -73,12 +73,12 @@ def check_db() -> bool:
 
 
 def fetch_all(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-    with pool.connection(timeout=2.0) as cx:
+    with pool.connection(timeout=10.0) as cx:
         return cx.execute(sql, params).fetchall()
 
 
 def fetch_one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
-    with pool.connection(timeout=2.0) as cx:
+    with pool.connection(timeout=10.0) as cx:
         return cx.execute(sql, params).fetchone()
 
 
