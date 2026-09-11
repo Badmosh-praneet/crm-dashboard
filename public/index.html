@@ -988,6 +988,7 @@ document.addEventListener("change", async e => {
   try {
     await send("PATCH", `/api/bookings/${id}`, { [field]: value });
     toast(`Booking ${id} updated.`);
+    refresh();
   } catch (err) {
     toast(err.message, { bad: true });
     refresh();
@@ -1001,6 +1002,7 @@ document.addEventListener("click", async e => {
   try {
     await send("DELETE", `/api/entries/${del}/${id}`);
     toast("Deleted.");
+    refresh();
   } catch (err) {
     toast(err.message, { bad: true });
   }
@@ -1303,6 +1305,7 @@ async function saveForm() {
     } else {
       toast(`${f.label} saved.`);
     }
+    await refresh();
     openDrawer(currentForm);      // fresh form, ready for the next one
   } catch (e2) {
     err.textContent = e2.message;
