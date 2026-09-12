@@ -10,13 +10,7 @@
     <title>Volkswagen Elite Motors — Daily Sales Report</title>
   </head>
   <body>
-    <div id="root">
-      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:70vh;gap:12px;color:#868e96;font-family:'Plus Jakarta Sans',system-ui,sans-serif;">
-        <div style="width:36px;height:36px;border:3px solid #004fb6;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
-        <div style="font-weight:600;font-size:15px;">Loading Volkswagen Elite Motors Dashboard...</div>
-      </div>
-      <style>@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }</style>
-    </div>
-    <script src="/static/assets/bundle.js" onerror="this.onerror=null;this.src='/assets/bundle.js';"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -23,3 +23,11 @@ ENV/
 # Operating System files
 .DS_Store
 Thumbs.db
+
+# Node.js / Frontend dependencies & builds
+node_modules/
+**/node_modules/
+dist/
+.claude/
+*.bak
+
