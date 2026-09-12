@@ -133,6 +133,14 @@ class ChangeBroker:
 
     # -- coalescing, on the event loop --------------------------------
 
+    def notify_sync(self, table: str) -> None:
+        """Trigger an immediate notification to subscribers from any thread."""
+        try:
+            if self._loop is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._note, table)
+        except Exception as exc:
+            log.debug("notify_sync failed: %s", exc)
+
     def _note(self, table: str) -> None:
         self._pending.add(table)
         if self._flush_handle is None and self._loop is not None:

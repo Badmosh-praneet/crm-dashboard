@@ -48,6 +48,15 @@ def has_database() -> bool:
     return True
 
 
+def ensure_pool_open() -> None:
+    """Ensure connection pool is opened."""
+    try:
+        if getattr(pool, "closed", True):
+            pool.open()
+    except Exception as exc:
+        log.warning("Could not open database pool: %s", exc)
+
+
 def is_db_ready() -> bool:
     """Fast check with 30s failure caching so requests never hang on unreachable DB."""
     global _db_ready, _last_check_time
@@ -58,6 +67,7 @@ def is_db_ready() -> bool:
         return False
     _last_check_time = now
     try:
+        ensure_pool_open()
         with pool.connection(timeout=10.0) as cx:
             cx.execute("SELECT 1")
             _db_ready = True
@@ -73,11 +83,13 @@ def check_db() -> bool:
 
 
 def fetch_all(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+    ensure_pool_open()
     with pool.connection(timeout=10.0) as cx:
         return cx.execute(sql, params).fetchall()
 
 
 def fetch_one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
+    ensure_pool_open()
     with pool.connection(timeout=10.0) as cx:
         return cx.execute(sql, params).fetchone()
 

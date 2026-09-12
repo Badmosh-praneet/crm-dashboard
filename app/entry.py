@@ -14,6 +14,7 @@ from __future__ import annotations
 import calendar
 import io
 import json
+import logging
 import os
 import re
 from datetime import date, datetime
@@ -24,7 +25,7 @@ import psycopg
 from psycopg.errors import IntegrityError
 
 from . import fallback
-from .db import is_db_ready, fetch_all, pool, DSN
+from .db import is_db_ready, fetch_all, pool, DSN, ensure_pool_open
 from .events import broker
 from etl.dimensions import activate_period
 from etl.load_dsr import Loader
@@ -33,6 +34,7 @@ from .write import (AllotmentIn, BookingIn, BookingPatch, LeadIn, RegistrationIn
                     create_lead, create_registration, create_test_drive,
                     delete_row, update_booking, upsert_vehicle)
 
+log = logging.getLogger("dsr.entry")
 router = APIRouter()
 
 MONTH_MAP = {
@@ -108,95 +110,93 @@ def live_status():
 
 def _commit(fn, *args):
     """Run one writer inside a transaction and turn its errors into HTTP codes."""
+    ensure_pool_open()
     try:
-        with pool.connection(timeout=3.0) as cx:
+        with pool.connection(timeout=10.0) as cx:
             with cx.transaction():
                 return fn(cx, *args)
+    except HTTPException:
+        raise
     except PermissionError as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except IntegrityError as exc:
         raise HTTPException(409, str(exc).strip().splitlines()[0]) from exc
+    except Exception as exc:
+        log.exception("Database transaction failed: %s", exc)
+        raise HTTPException(500, f"Database transaction failed: {exc}") from exc
 
 
 @router.post("/api/leads", status_code=201, tags=["entry"])
 def add_lead(body: LeadIn):
     if is_db_ready():
-        try:
-            return _commit(create_lead, body)
-        except Exception:
-            pass
+        res = _commit(create_lead, body)
+        broker.notify_sync("lead")
+        return res
     return fallback.store.add_lead(body.model_dump())
 
 
 @router.post("/api/bookings", status_code=201, tags=["entry"])
 def add_booking(body: BookingIn):
     if is_db_ready():
-        try:
-            return _commit(create_booking, body)
-        except Exception:
-            pass
+        res = _commit(create_booking, body)
+        broker.notify_sync("booking")
+        return res
     return fallback.store.add_booking(body.model_dump())
 
 
 @router.patch("/api/bookings/{booking_id}", tags=["entry"])
 def patch_booking(booking_id: int, body: BookingPatch):
     if is_db_ready():
-        try:
-            return _commit(update_booking, booking_id, body)
-        except Exception:
-            pass
+        res = _commit(update_booking, booking_id, body)
+        broker.notify_sync("booking")
+        return res
     return fallback.store.patch_booking(booking_id, body.model_dump(exclude_unset=True))
 
 
 @router.post("/api/test-drives", status_code=201, tags=["entry"])
 def add_test_drive(body: TestDriveIn):
     if is_db_ready():
-        try:
-            return _commit(create_test_drive, body)
-        except Exception:
-            pass
+        res = _commit(create_test_drive, body)
+        broker.notify_sync("test_drive")
+        return res
     return fallback.store.add_test_drive(body.model_dump())
 
 
 @router.post("/api/vehicles", status_code=201, tags=["entry"])
 def add_vehicle(body: VehicleIn):
     if is_db_ready():
-        try:
-            return _commit(upsert_vehicle, body)
-        except Exception:
-            pass
+        res = _commit(upsert_vehicle, body)
+        broker.notify_sync("vehicle")
+        return res
     return fallback.store.add_vehicle(body.model_dump())
 
 
 @router.post("/api/allotments", status_code=201, tags=["entry"])
 def add_allotment(body: AllotmentIn):
     if is_db_ready():
-        try:
-            return _commit(create_allotment, body)
-        except Exception:
-            pass
+        res = _commit(create_allotment, body)
+        broker.notify_sync("allotment")
+        return res
     return fallback.store.add_allotment(body.model_dump())
 
 
 @router.post("/api/registrations", status_code=201, tags=["entry"])
 def add_registration(body: RegistrationIn):
     if is_db_ready():
-        try:
-            return _commit(create_registration, body)
-        except Exception:
-            pass
+        res = _commit(create_registration, body)
+        broker.notify_sync("registration")
+        return res
     return fallback.store.add_registration(body.model_dump())
 
 
 @router.delete("/api/entries/{table}/{row_id}", status_code=200, tags=["entry"])
 def delete_entry(table: str, row_id: int):
     if is_db_ready():
-        try:
-            return _commit(delete_row, table, row_id)
-        except Exception:
-            pass
+        res = _commit(delete_row, table, row_id)
+        broker.notify_sync(table)
+        return res
     return fallback.store.delete_entry(table, row_id)
 
 
