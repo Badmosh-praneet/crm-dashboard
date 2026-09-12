@@ -127,19 +127,21 @@ export default function DataTables({ orderbook = [], sources = [], backorders = 
             <thead>
               <tr>
                 <th>Channel / Source</th>
+                <th>Type</th>
                 <th className="num">Enquiries</th>
                 <th className="num">Qualified</th>
-                <th className="num">Bookings</th>
+                <th className="num">Qualified %</th>
               </tr>
             </thead>
             <tbody>
               {sources.map((s, i) => (
                 <tr key={s.source || i}>
                   <td style={{ fontWeight: '600' }}>{s.source}</td>
-                  <td className="num">{n0(s.enquiries || 0)}</td>
-                  <td className="num">{n0(s.qualified || 0)}</td>
-                  <td className="num" style={{ fontWeight: '700', color: 'var(--s1)' }}>
-                    {n0(s.bookings || 0)}
+                  <td style={{ color: 'var(--ink-muted)' }}>{s.channel || 'Direct'}</td>
+                  <td className="num">{n0(s.leads ?? s.enquiries ?? 0)}</td>
+                  <td className="num">{n0(s.qualified ?? 0)}</td>
+                  <td className="num" style={{ fontWeight: '600', color: 'var(--good)' }}>
+                    {pct(s.qualified_pct)}
                   </td>
                 </tr>
               ))}

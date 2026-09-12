@@ -48,8 +48,22 @@ export async function fetchDashboardData() {
       api("/api/bookings?limit=50"),
     ]);
 
+    // Enrich KPI with targets from funnel stages if not directly set
+    const targetsByStage = {};
+    (funnel?.stages || []).forEach(s => {
+      if (s.stage && s.target != null) targetsByStage[s.stage] = s.target;
+    });
+
+    const enrichedKpi = {
+      ...kpi,
+      booking_target: kpi.booking_target ?? targetsByStage["Bookings"] ?? 84,
+      retail_target: kpi.retail_target ?? targetsByStage["Retails"] ?? 66,
+      leads_target: kpi.leads_target ?? targetsByStage["Enquiries"] ?? 450,
+      td_target: kpi.td_target ?? targetsByStage["Test drives"] ?? 300,
+    };
+
     return {
-      kpi, funnel, board, sources, models, ageing, backorders,
+      kpi: enrichedKpi, funnel, board, sources, models, ageing, backorders,
       periods, options, activity, orderbook,
       isLive: true,
     };
