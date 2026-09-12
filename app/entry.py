@@ -314,31 +314,93 @@ def set_active_period(label: str):
 # =====================================================================
 
 @router.post("/api/upload-dsr", tags=["ingestion"])
+@router.post("/api/upload-report", tags=["ingestion"])
 async def upload_dsr_workbook(
-    file: UploadFile = File(..., description="DSR Excel workbook (.xlsx or .xlsm)"),
+    file: UploadFile = File(..., description="DSR Report file (.xlsx, .xlsm, .csv, .txt, .tsv)"),
     period: str | None = Form(None, description="Optional period label e.g. AUG2026, SEP2026"),
     uploaded_by: str = Form("Reporting Agent", description="Name of agent or manager uploading"),
+    table_type: str | None = Form(None, description="Optional target table: auto, booking, lead, vehicle"),
 ):
     """
-    Ingest a complete DSR Excel workbook.
-    Rebuilds facts (leads, bookings, test drives, allotments, registrations)
-    and period targets, updates dimension caches, and notifies connected clients.
+    Ingest a DSR report file (Excel workbook, CSV, or Text format).
+    Rebuilds/updates facts (leads, bookings, vehicles, test drives),
+    updates period alignment in Supabase, and notifies connected web clients.
     """
-    fname = file.filename or "unknown.xlsx"
-    if not fname.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(400, "Invalid file format. Please upload an Excel .xlsx or .xlsm file.")
+    fname = file.filename or "unknown_report.txt"
+    fname_lower = fname.lower()
+    allowed_exts = (".xlsx", ".xlsm", ".xls", ".csv", ".txt", ".tsv")
+    if not fname_lower.endswith(allowed_exts):
+        raise HTTPException(
+            400,
+            f"Invalid file format. Please upload an Excel (.xlsx, .xlsm), CSV (.csv), or Text (.txt, .tsv) file."
+        )
 
     content = await file.read()
     if not content:
         raise HTTPException(400, "Uploaded file is empty.")
 
+    period_label, period_start, period_end = _resolve_period(period, fname)
+
+    # 1. Handle Plain Text, CSV, and TSV files
+    if fname_lower.endswith((".csv", ".txt", ".tsv")):
+        from etl.text_parser import ingest_text_report
+        try:
+            parse_result = ingest_text_report(
+                content=content,
+                filename=fname,
+                period_label=period_label,
+                period_start=period_start,
+                period_end=period_end,
+                uploaded_by=uploaded_by,
+                table_type=table_type,
+            )
+            counts = parse_result.get("counts", {})
+            warnings = parse_result.get("warnings", [])
+
+            if is_db_ready():
+                try:
+                    with psycopg.connect(DSN, autocommit=True) as cx:
+                        cx.execute("""
+                            INSERT INTO etl_run (source_file, file_modified, finished_at, row_counts, notes)
+                            VALUES (%s, now(), now(), %s, %s)
+                        """, (
+                            fname,
+                            json.dumps(counts),
+                            f"Uploaded {parse_result.get('detected_format', 'text')} by {uploaded_by}",
+                        ))
+                except Exception:
+                    pass
+
+            try:
+                await broker.notify("workbook_reload", "etl_run", {"counts": counts, "period": period_label})
+            except Exception:
+                pass
+
+            return {
+                "status": "success",
+                "message": f"Successfully ingested {parse_result.get('detected_format', 'report')} '{fname}' for {period_label}.",
+                "filename": fname,
+                "file_type": "text/csv",
+                "detected_format": parse_result.get("detected_format"),
+                "detected_table": parse_result.get("detected_table"),
+                "period": period_label,
+                "period_range": f"{period_start} to {period_end}",
+                "uploaded_by": uploaded_by,
+                "counts": counts,
+                "warnings": warnings,
+                "environment": "postgres" if is_db_ready() else "fallback",
+            }
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(400, f"Failed to ingest CSV/TXT report: {exc}")
+
+    # 2. Handle Excel Workbooks (.xlsx, .xlsm)
     import openpyxl
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as exc:
         raise HTTPException(400, f"Could not parse Excel workbook: {exc}")
-
-    period_label, period_start, period_end = _resolve_period(period, fname)
 
     if is_db_ready():
         try:
@@ -363,6 +425,7 @@ async def upload_dsr_workbook(
                 "status": "success",
                 "message": f"Successfully ingested '{fname}' into PostgreSQL database for {period_label}.",
                 "filename": fname,
+                "file_type": "excel",
                 "period": period_label,
                 "period_range": f"{period_start} to {period_end}",
                 "uploaded_by": uploaded_by,

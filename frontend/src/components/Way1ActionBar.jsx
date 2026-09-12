@@ -61,10 +61,10 @@ export default function Way1ActionBar({
         <button
           className="w1-btn excel-btn"
           onClick={onOpenUpload}
-          title="Upload or drag-and-drop monthly DSR Excel workbook (.xlsx / .xlsm)"
+          title="Upload or drag-and-drop monthly DSR report (Excel, CSV, TXT)"
         >
           <UploadCloud size={15} />
-          <span>Upload Excel</span>
+          <span>Upload Report</span>
         </button>
 
         <button

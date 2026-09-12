@@ -1,11 +1,12 @@
 import React, { useState, useRef } from 'react';
-import { X, UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import { uploadExcelWorkbook } from '../api/client';
+import { X, UploadCloud, FileSpreadsheet, FileText, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { uploadReportFile } from '../api/client';
 
 export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) {
   const [file, setFile] = useState(null);
   const [period, setPeriod] = useState('');
   const [uploader, setUploader] = useState('Reporting Agent');
+  const [tableType, setTableType] = useState('auto');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -14,24 +15,40 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
 
   if (!isOpen) return null;
 
+  const getFormatBadge = (name) => {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (['xlsx', 'xlsm', 'xls'].includes(ext)) {
+      return { label: 'Excel Workbook', bg: 'var(--s3-light)', color: 'var(--good-text)', icon: FileSpreadsheet };
+    }
+    if (['csv'].includes(ext)) {
+      return { label: 'CSV Spreadsheet', bg: 'var(--s1-light)', color: 'var(--s1)', icon: FileSpreadsheet };
+    }
+    if (['txt', 'tsv'].includes(ext)) {
+      return { label: 'Text / Delimited Report', bg: 'var(--surface-sub)', color: 'var(--ink-2)', icon: FileText };
+    }
+    return null;
+  };
+
+  const validateAndSetFile = (f) => {
+    if (f.name.match(/\.xlsx?$|\.xlsm$|\.csv$|\.txt$|\.tsv$/i)) {
+      setFile(f);
+      setError(null);
+    } else {
+      setError('Please select a valid report file (.xlsx, .xlsm, .csv, or .txt).');
+    }
+  };
+
   const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length) {
-      const f = e.dataTransfer.files[0];
-      if (f.name.match(/\.xlsx?$|\.xlsm$/i)) {
-        setFile(f);
-        setError(null);
-      } else {
-        setError('Please select a valid Excel workbook (.xlsx or .xlsm).');
-      }
+      validateAndSetFile(e.dataTransfer.files[0]);
     }
   };
 
   const handleFileChange = (e) => {
     if (e.target.files && e.target.files.length) {
-      setFile(e.target.files[0]);
-      setError(null);
+      validateAndSetFile(e.target.files[0]);
     }
   };
 
@@ -42,7 +59,7 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
     setResult(null);
 
     try {
-      const data = await uploadExcelWorkbook(file, period, uploader);
+      const data = await uploadReportFile(file, period, uploader, tableType);
       setResult(data);
       onUploadComplete(`Ingested '${data.filename}' into Supabase for ${data.period}!`, data);
     } catch (err) {
@@ -52,13 +69,16 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
     }
   };
 
+  const badge = file ? getFormatBadge(file.name) : null;
+  const BadgeIcon = badge?.icon || FileSpreadsheet;
+
   return (
     <div className="drawer-scrim" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
       <div style={{
         background: 'var(--surface)',
         border: '1px solid var(--border-strong)',
         borderRadius: 'var(--radius-lg)',
-        maxWidth: '520px',
+        maxWidth: '540px',
         width: '100%',
         boxShadow: 'var(--shadow-lg)',
         overflow: 'hidden',
@@ -74,7 +94,7 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
           alignItems: 'center',
         }}>
           <div>
-            <h2 style={{ fontSize: '16px', fontWeight: '700' }}>📥 Ingest Monthly DSR Excel Workbook</h2>
+            <h2 style={{ fontSize: '16px', fontWeight: '700' }}>📥 Ingest DSR Report (Excel, CSV, TXT)</h2>
             <p style={{ margin: '2px 0 0', fontSize: '12px', color: 'var(--ink-muted)' }}>
               Bulk-loads bookings, vehicle stock, enquiries, and targets into Supabase.
             </p>
@@ -94,24 +114,43 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
             style={{
               border: `2px dashed ${dragOver ? 'var(--s1)' : 'var(--axis)'}`,
               borderRadius: 'var(--radius-md)',
-              padding: '30px 16px',
+              padding: '28px 16px',
               textAlign: 'center',
               background: dragOver ? 'var(--s1-light)' : 'var(--surface-sub)',
               cursor: 'pointer',
               transition: 'all 0.15s ease',
             }}
           >
-            <FileSpreadsheet size={36} style={{ color: file ? 'var(--s3)' : 'var(--ink-muted)', marginBottom: '8px' }} />
+            <BadgeIcon size={36} style={{ color: file ? 'var(--s1)' : 'var(--ink-muted)', marginBottom: '8px' }} />
             <div style={{ fontWeight: '600', fontSize: '14px', marginBottom: '4px' }}>
-              {file ? file.name : 'Drop DSR Excel file here, or browse'}
+              {file ? file.name : 'Drop report file here, or browse'}
             </div>
             <div style={{ fontSize: '12px', color: 'var(--ink-muted)' }}>
-              {file ? `${(file.size / 1024).toFixed(1)} KB` : 'Supports .xlsx and .xlsm files (e.g. DSR August 2026.xlsx)'}
+              {file
+                ? `${(file.size / 1024).toFixed(1)} KB`
+                : 'Supports Excel (.xlsx, .xlsm), CSV (.csv), and Text (.txt, .tsv)'}
             </div>
+
+            {badge && (
+              <div style={{ marginTop: '10px' }}>
+                <span style={{
+                  display: 'inline-block',
+                  padding: '3px 10px',
+                  borderRadius: '999px',
+                  fontSize: '11.5px',
+                  fontWeight: '700',
+                  background: badge.bg,
+                  color: badge.color,
+                }}>
+                  {badge.label}
+                </span>
+              </div>
+            )}
+
             <input
               ref={fileInputRef}
               type="file"
-              accept=".xlsx,.xlsm"
+              accept=".xlsx,.xlsm,.xls,.csv,.txt,.tsv"
               onChange={handleFileChange}
               style={{ display: 'none' }}
             />
@@ -119,21 +158,31 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
 
           <div className="row-2">
             <label className="field" style={{ margin: 0 }}>
-              <span>Reporting Period <em>(Optional)</em></span>
+              <span>Target Data Type</span>
+              <select value={tableType} onChange={e => setTableType(e.target.value)}>
+                <option value="auto">Auto-Detect (Recommended)</option>
+                <option value="booking">Bookings / Order Book</option>
+                <option value="lead">Leads / Enquiries</option>
+                <option value="vehicle">Vehicles / Stock Inventory</option>
+              </select>
+            </label>
+            <label className="field" style={{ margin: 0 }}>
+              <span>Reporting Period</span>
               <input
                 value={period}
                 onChange={e => setPeriod(e.target.value)}
-                placeholder="Auto-detect (e.g. AUG2026)"
-              />
-            </label>
-            <label className="field" style={{ margin: 0 }}>
-              <span>Uploaded By</span>
-              <input
-                value={uploader}
-                onChange={e => setUploader(e.target.value)}
+                placeholder="Auto-detect (e.g. AUG2026, SEP2026)"
               />
             </label>
           </div>
+
+          <label className="field" style={{ margin: 0 }}>
+            <span>Uploaded By</span>
+            <input
+              value={uploader}
+              onChange={e => setUploader(e.target.value)}
+            />
+          </label>
 
           {loading && (
             <div style={{
@@ -147,9 +196,9 @@ export default function ExcelUploadModal({ isOpen, onClose, onUploadComplete }) 
             }}>
               <Loader2 size={20} className="animate-spin" style={{ color: 'var(--s1)' }} />
               <div>
-                <div style={{ fontWeight: '600' }}>Ingesting workbook and updating Supabase database...</div>
+                <div style={{ fontWeight: '600' }}>Ingesting report and updating Supabase database...</div>
                 <div style={{ fontSize: '11.5px', color: 'var(--ink-muted)' }}>
-                  Calculating dimensions, vehicle stock status, and consultant targets.
+                  Parsing columns, normalizing dimensions, and calculating live metrics.
                 </div>
               </div>
             </div>

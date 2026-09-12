@@ -112,22 +112,25 @@ export async function fetchDashboardData() {
   }
 }
 
-export async function uploadExcelWorkbook(file, period, uploadedBy) {
+export async function uploadReportFile(file, period, uploadedBy, tableType) {
   const formData = new FormData();
   formData.append("file", file);
   if (period) formData.append("period", period);
   if (uploadedBy) formData.append("uploaded_by", uploadedBy);
+  if (tableType && tableType !== "auto") formData.append("table_type", tableType);
 
-  const res = await fetch("/api/upload-dsr", {
+  const res = await fetch("/api/upload-report", {
     method: "POST",
     body: formData,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.detail || "Excel upload failed");
+    throw new Error(data.detail || "Report upload failed");
   }
   return data;
 }
+
+export const uploadExcelWorkbook = uploadReportFile;
 
 export async function activatePeriod(label) {
   return sendJson("POST", `/api/period/${encodeURIComponent(label)}/activate`);
