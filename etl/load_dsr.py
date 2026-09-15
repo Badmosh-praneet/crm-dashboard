@@ -25,6 +25,9 @@ import psycopg
 
 from . import dimensions as dims
 from . import normalize as nz
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DEFAULT_DSN = os.environ.get(
     "DATABASE_URL",
@@ -63,15 +66,74 @@ class Loader:
 
         # caches: canonical key -> surrogate id
         self.teams: dict[str, int] = {}
+        for name, tid in self.cx.execute("SELECT name, team_id FROM dim_team").fetchall():
+            k = nz.team_key(name)
+            if k: self.teams[k] = tid
+            
         self.consultants: dict[str, int] = {}
+        for name, cid in self.cx.execute("SELECT full_name, consultant_id FROM dim_consultant").fetchall():
+            k = nz.consultant_key(name)
+            if k: self.consultants[k] = cid
+            
         self.models: dict[str, int] = {}
+        for name, mid in self.cx.execute("SELECT name, model_id FROM dim_model").fetchall():
+            k = nz.model_key(name)
+            if k: self.models[k] = mid
+            
         self.variants: dict[tuple[int, str], int] = {}
+        for mid, name, vid in self.cx.execute("SELECT model_id, name, variant_id FROM dim_variant").fetchall():
+            k = nz.variant_key(name)
+            if k: self.variants[(mid, k)] = vid
+            
         self.colours: dict[str, int] = {}
+        for name, cid in self.cx.execute("SELECT name, colour_id FROM dim_colour").fetchall():
+            k = nz.colour_key(name)
+            if k: self.colours[k] = cid
+            
         self.sources: dict[str, int] = {}
+        for name, sid in self.cx.execute("SELECT name, source_id FROM dim_lead_source").fetchall():
+            k = nz.source_key(name)
+            if k: self.sources[k[0]] = sid
+
         self.period_id: int | None = None
         self.vehicle_by_chassis: dict[str, int] = {}
+        
+        self._updated_variants: set[tuple] = set()
+        self._updated_consultants: set[tuple] = set()
 
     # -- small helpers ------------------------------------------------
+
+    def fast_executemany(self, query, rows, dedup_idx=None):
+        import re
+        if not rows: return
+        
+        if dedup_idx is not None:
+            # Only rows that actually carry a key can be deduplicated on it. The
+            # Leads tab leaves the CRM record id blank for every row, so keying
+            # on it collapsed all 367 August enquiries into one - the dashboard
+            # then read 1 enquiry against 42 bookings.
+            seen, keyless = {}, []
+            for row in rows:
+                if row[dedup_idx] is None:
+                    keyless.append(row)
+                else:
+                    seen[row[dedup_idx]] = row
+            rows = list(seen.values()) + keyless
+            
+        match = re.search(r'(?i)(VALUES\s*)(\([^)]+\))', query)
+        if not match:
+            self.cx.cursor().executemany(query, rows)
+            return
+            
+        prefix = query[:match.start(2)]
+        placeholders = match.group(2)
+        suffix = query[match.end(2):]
+        
+        for i in range(0, len(rows), 1000):
+            chunk = rows[i:i+1000]
+            values_str = ",".join([placeholders] * len(chunk))
+            flat = [v for row in chunk for v in row]
+            self.cx.execute(prefix + values_str + suffix, flat)
 
     def rows(self, sheet: str, header_row: int, key_col: int):
         """
@@ -82,10 +144,13 @@ class Loader:
         its key column is populated.
         """
         ws = self.wb[sheet]
-        for r in range(header_row + 1, ws.max_row + 1):
-            if nz.clean(ws.cell(r, key_col).value) is None:
+        for r, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1):
+            # No early exit on a run of blanks: the Leads tab alone has a
+            # 120-row gap before its last entries, and iter_rows is cheap enough
+            # to read the sheet out in full.
+            if not row or key_col > len(row) or nz.clean(row[key_col - 1]) is None:
                 continue
-            yield r, (lambda c, _r=r, _ws=ws: _ws.cell(_r, c).value)
+            yield r, (lambda c, _row=row: _row[c - 1] if c <= len(_row) else None)
 
     def one(self, sql: str, params=()) -> int:
         return self.cx.execute(sql, params).fetchone()[0]
@@ -119,7 +184,10 @@ class Loader:
         cid = self._cached(self.consultants, key,
                            lambda: dims.resolve_consultant(self.cx, label))
         if team is not None or channel is not None:
-            dims.resolve_consultant(self.cx, label, team=team, channel=channel)
+            ukey = (cid, team, channel)
+            if ukey not in self._updated_consultants:
+                dims.resolve_consultant(self.cx, label, team=team, channel=channel)
+                self._updated_consultants.add(ukey)
         return cid
 
     def model_id(self, label) -> int | None:
@@ -141,10 +209,13 @@ class Loader:
         # The booking tabs name the trim but not the factory text; the stock tabs
         # carry both. Backfill whichever arrives second.
         if long_text or model_code:
-            self.cx.execute(
-                "UPDATE dim_variant SET long_model_text = COALESCE(long_model_text, %s), "
-                "model_code = COALESCE(model_code, %s) WHERE variant_id = %s",
-                (nz.clean(long_text), nz.upper(model_code), vid))
+            ukey = (vid, nz.clean(long_text), nz.upper(model_code))
+            if ukey not in self._updated_variants:
+                self.cx.execute(
+                    "UPDATE dim_variant SET long_model_text = COALESCE(long_model_text, %s), "
+                    "model_code = COALESCE(model_code, %s) WHERE variant_id = %s",
+                    (nz.clean(long_text), nz.upper(model_code), vid))
+                self._updated_variants.add(ukey)
         return vid
 
     def colour_id(self, label, code=None) -> int | None:
@@ -212,7 +283,8 @@ class Loader:
         Stock & Allotted is the live inventory; Reg Report adds units that have
         already left stock. Both key on chassis number, so the second pass upserts.
         """
-        inserted = 0
+        print("loading vehicles...")
+        rows = []
         for sheet, header, cols in (
             ("Stock & Allotted", 1, dict(chassis=3, comm=2, engine=4, model_code=5,
                                          long=6, variant=7, my=9, obd=10, options=11,
@@ -249,23 +321,25 @@ class Loader:
                     nz.stock_status(cell(cols["status"])) or "FREESTOCK",
                     nz.as_date(cell(cols["nadcon"])),
                 )
-                self.cx.execute("""
-                    INSERT INTO vehicle (chassis_number, commission_no, engine_number,
-                        model_id, variant_id, colour_id, model_code, long_model_text,
-                        model_year, obd, options, billing_date, stock_received_date,
-                        stock_aging_days, stock_status, nadcon_retail_date)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (chassis_number) DO UPDATE SET
-                        -- Reg Report is the later snapshot for units it mentions,
-                        -- so its status wins; everything else is only backfilled.
-                        stock_status = EXCLUDED.stock_status,
-                        commission_no = COALESCE(vehicle.commission_no, EXCLUDED.commission_no),
-                        engine_number = COALESCE(vehicle.engine_number, EXCLUDED.engine_number),
-                        colour_id = COALESCE(vehicle.colour_id, EXCLUDED.colour_id),
-                        variant_id = COALESCE(vehicle.variant_id, EXCLUDED.variant_id),
-                        nadcon_retail_date = COALESCE(vehicle.nadcon_retail_date, EXCLUDED.nadcon_retail_date)
-                    """, row)
-                inserted += 1
+                rows.append(row)
+        
+        if rows:
+            self.fast_executemany("""
+                INSERT INTO vehicle (chassis_number, commission_no, engine_number,
+                    model_id, variant_id, colour_id, model_code, long_model_text,
+                    model_year, obd, options, billing_date, stock_received_date,
+                    stock_aging_days, stock_status, nadcon_retail_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (chassis_number) DO UPDATE SET
+                    -- Reg Report is the later snapshot for units it mentions,
+                    -- so its status wins; everything else is only backfilled.
+                    stock_status = EXCLUDED.stock_status,
+                    commission_no = COALESCE(vehicle.commission_no, EXCLUDED.commission_no),
+                    engine_number = COALESCE(vehicle.engine_number, EXCLUDED.engine_number),
+                    colour_id = COALESCE(vehicle.colour_id, EXCLUDED.colour_id),
+                    variant_id = COALESCE(vehicle.variant_id, EXCLUDED.variant_id),
+                    nadcon_retail_date = COALESCE(vehicle.nadcon_retail_date, EXCLUDED.nadcon_retail_date)
+                """, rows, dedup_idx=0)
         for chassis, vid in self.cx.execute(
                 "SELECT chassis_number, vehicle_id FROM vehicle").fetchall():
             self.vehicle_by_chassis[chassis] = vid
@@ -277,18 +351,13 @@ class Loader:
         date, name, source and model of interest). TD Leads is a full 2024 dump kept
         for year-on-year comparison and flagged is_current_period = false.
         """
+        print("loading leads...")
+        rows = []
         for sheet, current in (("Leads", True), ("TD Leads", False)):
             key_col = 5 if sheet == "Leads" else 2
             for _, cell in self.rows(sheet, 1, key_col):
                 created = nz.as_datetime(cell(2))
-                self.cx.execute("""
-                    INSERT INTO lead (lead_record_id, created_at, lead_name, mobile, email,
-                        source_id, lead_type, model_of_interest, variant_of_interest,
-                        colour_of_interest, model_id, lead_owner, consultant_id,
-                        lead_status, rating, qualified_stage, test_drive_given,
-                        trade_in, trade_in_vehicle, dealership, period_id, is_current_period)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """, (
+                rows.append((
                     nz.clean(cell(1)), created, nz.clean(cell(5)), nz.mobile(cell(7)),
                     nz.clean(cell(8)), self.source_id(cell(9)), nz.clean(cell(6)),
                     nz.clean(cell(10)), nz.clean(cell(11)), nz.clean(cell(14)),
@@ -298,18 +367,23 @@ class Loader:
                     nz.as_bool(cell(25)), nz.as_bool(cell(26)), nz.clean(cell(28)),
                     nz.clean(cell(4)), self.period_id if current else None, current,
                 ))
+        
+        if rows:
+            self.fast_executemany("""
+                INSERT INTO lead (lead_record_id, created_at, lead_name, mobile, email,
+                    source_id, lead_type, model_of_interest, variant_of_interest,
+                    colour_of_interest, model_id, lead_owner, consultant_id,
+                    lead_status, rating, qualified_stage, test_drive_given,
+                    trade_in, trade_in_vehicle, dealership, period_id, is_current_period)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, rows, dedup_idx=0)
         self.counts["lead"] = self.one("SELECT count(*) FROM lead")
 
     def load_test_drives(self):
+        print("loading test drives...")
+        rows = []
         for _, cell in self.rows("TD", 1, 8):
-            self.cx.execute("""
-                INSERT INTO test_drive (test_drive_number, lead_record_id, lead_name,
-                    mobile, email, source_id, stage, model_of_interest, model_id,
-                    model_code, start_km, end_km, total_distance_km, td_date, status,
-                    created_at, outlet, consultant_id)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (test_drive_number) DO NOTHING
-                """, (
+            rows.append((
                 nz.upper(cell(8)), nz.clean(cell(16)), nz.clean(cell(1)),
                 nz.mobile(cell(4)), nz.clean(cell(5)), self.source_id(cell(3)),
                 nz.clean(cell(6)), nz.clean(cell(7)),
@@ -318,6 +392,16 @@ class Loader:
                 nz.as_date(cell(13)), nz.clean(cell(14)), nz.as_datetime(cell(15)),
                 nz.clean(cell(17)), self.consultant_id(cell(18)),
             ))
+        
+        if rows:
+            self.fast_executemany("""
+                INSERT INTO test_drive (test_drive_number, lead_record_id, lead_name,
+                    mobile, email, source_id, stage, model_of_interest, model_id,
+                    model_code, start_km, end_km, total_distance_km, td_date, status,
+                    created_at, outlet, consultant_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (test_drive_number) DO NOTHING
+                """, rows, dedup_idx=0)
         self.counts["test_drive"] = self.one("SELECT count(*) FROM test_drive")
 
     def load_bookings(self):
@@ -327,27 +411,20 @@ class Loader:
         so `is_current_period` is the safe filter for month numbers while the other
         tabs stay available as the live/pending/carry-over views the floor uses.
         """
-        # (sheet, header row, is_current_period, trailing note columns)
+        print("loading bookings...")
         booking_tabs = [
             ("Current Month Booking", 1, True, [18]),
             ("Live Booking", 2, False, [15]),
             ("Pending Booking", 1, False, [17, 18]),
             ("Golf & Tiguan R Line Booking", 1, False, [18]),
         ]
+        rows_main = []
         for sheet, header, current, note_cols in booking_tabs:
             for _, cell in self.rows(sheet, header, 6):
                 notes = " | ".join(
                     n for n in (nz.clean(cell(c)) for c in note_cols) if n) or None
                 model_label, variant_label = cell(8), cell(9)
-                self.cx.execute("""
-                    INSERT INTO booking (booking_date, contract_no, source_id,
-                        consultant_id, customer_name, mobile, model_id, variant_id,
-                        colour_id, model_year, long_model_text, fulfilment_status,
-                        car_origin, crm_entry_done, booking_amount,
-                        booking_amount_receipted, notes, source_sheet,
-                        period_id, is_current_period)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """, (
+                rows_main.append((
                     nz.as_date(cell(2)), nz.clean(cell(3)), self.source_id(cell(4)),
                     self.consultant_id(cell(5)), nz.clean(cell(6)), nz.mobile(cell(7)),
                     self.model_id(model_label),
@@ -359,18 +436,22 @@ class Loader:
                     notes, sheet, self.period_id if current else None, current,
                 ))
 
-        # Booking & Alloted is the consolidated order book: it carries the team,
-        # the VIN once allotted, and DOB/DOA (date of booking / date of allotment).
+        if rows_main:
+            self.fast_executemany("""
+                INSERT INTO booking (booking_date, contract_no, source_id,
+                    consultant_id, customer_name, mobile, model_id, variant_id,
+                    colour_id, model_year, long_model_text, fulfilment_status,
+                    car_origin, crm_entry_done, booking_amount,
+                    booking_amount_receipted, notes, source_sheet,
+                    period_id, is_current_period)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, rows_main)
+
+        rows_alloted = []
         for _, cell in self.rows("Booking & Alloted", 1, 11):
             chassis = nz.upper(cell(8))
             model_label, variant_label = cell(5), cell(6)
-            self.cx.execute("""
-                INSERT INTO booking (booking_date, invoice_ref, consultant_id, team_id,
-                    customer_name, model_id, variant_id, colour_id, model_year,
-                    fulfilment_status, ageing_days, vehicle_id, source_sheet,
-                    period_id, is_current_period)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
+            rows_alloted.append((
                 nz.as_date(cell(14)) or nz.as_date(cell(3)), nz.clean(cell(2)),
                 self.consultant_id(cell(12), team=cell(13)), self.team_id(cell(13)),
                 nz.clean(cell(11)), self.model_id(model_label),
@@ -380,6 +461,15 @@ class Loader:
                 self.vehicle_by_chassis.get(chassis), "Booking & Alloted",
                 None, False,
             ))
+            
+        if rows_alloted:
+            self.fast_executemany("""
+                INSERT INTO booking (booking_date, invoice_ref, consultant_id, team_id,
+                    customer_name, model_id, variant_id, colour_id, model_year,
+                    fulfilment_status, ageing_days, vehicle_id, source_sheet,
+                    period_id, is_current_period)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, rows_alloted)
         self.counts["booking"] = self.one("SELECT count(*) FROM booking")
 
     def load_allotments(self):
@@ -388,34 +478,43 @@ class Loader:
         vehicle is matched back through Stock & Allotted on customer name.
         """
         matched = 0
+        rows = []
+        
+        booking_by_customer = {
+            name: bid for name, bid in self.cx.execute(
+                "SELECT upper(customer_name), booking_id FROM booking ORDER BY is_current_period ASC"
+            ).fetchall() if name
+        }
+        
+        vehicle_by_commission = {
+            comm: vid for comm, vid in self.cx.execute(
+                "SELECT commission_no, vehicle_id FROM vehicle WHERE commission_no IS NOT NULL"
+            ).fetchall() if comm
+        }
+
         for _, cell in self.rows("Alloted", 1, 5):
             customer = nz.upper(cell(5))
-            vehicle_id = self.cx.execute("""
-                SELECT v.vehicle_id FROM vehicle v
-                WHERE v.stock_status = 'ALLOTED'
-                  AND v.long_model_text = %s
-                  AND (v.stock_aging_days = %s OR %s IS NULL)
-                LIMIT 1
-                """, (nz.clean(cell(2)), nz.as_int(cell(4)), nz.as_int(cell(4)))
-            ).fetchone()
-            vid = vehicle_id[0] if vehicle_id else None
+            commission = nz.clean(cell(1))
+            vid = vehicle_by_commission.get(commission) if commission else None
             matched += 1 if vid else 0
-            booking = self.cx.execute("""
-                SELECT booking_id FROM booking
-                WHERE upper(customer_name) = %s ORDER BY is_current_period DESC LIMIT 1
-                """, (customer,)).fetchone()
-            self.cx.execute("""
+            bid = booking_by_customer.get(customer) if customer else None
+            
+            rows.append((
+                vid, bid, nz.clean(cell(5)),
+                self.consultant_id(cell(6)), nz.clean(cell(2)),
+                nz.colour_key(cell(3)), nz.as_int(cell(4)), nz.as_date(cell(7)),
+                nz.as_int(cell(8)), nz.upper(cell(9)), nz.upper(cell(10)),
+                nz.clean(cell(11))
+            ))
+            
+        if rows:
+            self.fast_executemany("""
                 INSERT INTO allotment (vehicle_id, booking_id, customer_name,
                     consultant_id, long_model_text, colour, stock_aging_days,
                     allotted_date, tat_days, vin, obd, remarks)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
-                vid, booking[0] if booking else None, nz.clean(cell(5)),
-                self.consultant_id(cell(6)), nz.clean(cell(2)),
-                nz.colour_key(cell(3)), nz.as_int(cell(4)), nz.as_date(cell(7)),
-                nz.as_int(cell(8)), nz.upper(cell(9)), nz.upper(cell(10)),
-                nz.clean(cell(11)),
-            ))
+                """, rows)
+                
         total = self.one("SELECT count(*) FROM allotment")
         self.counts["allotment"] = total
         if total and matched < total:
@@ -424,21 +523,11 @@ class Loader:
                 "a vehicle (the Alloted tab has no chassis column)")
 
     def load_registrations(self):
+        print("loading registrations...")
+        rows = []
         for _, cell in self.rows("Reg Report", 2, 3):
             chassis = nz.upper(cell(3))
-            self.cx.execute("""
-                INSERT INTO registration (vehicle_id, chassis_number, customer_name,
-                    consultant_id, source_id, status, booking_date, allotted_date,
-                    nadcon_retail_date, contact_no, address, email,
-                    nadcon_punched_customer, folder_lined_up_on,
-                    folder_given_to_accounts_on, time_given, folder_sent_to_ho,
-                    invoice_date, registration_date, registration_no, voiw_id,
-                    delivery_date, finance_type, bank, has_insurance,
-                    has_extended_warranty, has_service_value_package, is_corporate,
-                    dwa, dwa_actual, accessories, vw_offers, elite_discount)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
+            rows.append((
                 self.vehicle_by_chassis.get(chassis), chassis, nz.clean(cell(18)),
                 self.consultant_id(cell(19)), self.source_id(cell(20)),
                 nz.upper(cell(17)), nz.as_date(cell(21)), nz.as_date(cell(22)),
@@ -452,6 +541,21 @@ class Loader:
                 nz.as_bool(cell(42)), nz.as_num(cell(43)), nz.clean(cell(44)),
                 nz.as_num(cell(45)),
             ))
+            
+        if rows:
+            self.fast_executemany("""
+                INSERT INTO registration (vehicle_id, chassis_number, customer_name,
+                    consultant_id, source_id, status, booking_date, allotted_date,
+                    nadcon_retail_date, contact_no, address, email,
+                    nadcon_punched_customer, folder_lined_up_on,
+                    folder_given_to_accounts_on, time_given, folder_sent_to_ho,
+                    invoice_date, registration_date, registration_no, voiw_id,
+                    delivery_date, finance_type, bank, has_insurance,
+                    has_extended_warranty, has_service_value_package, is_corporate,
+                    dwa, dwa_actual, accessories, vw_offers, elite_discount)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, rows, dedup_idx=1)
         self.counts["registration"] = self.one("SELECT count(*) FROM registration")
 
     def load_scorecards(self):
@@ -699,8 +803,12 @@ def main():
 
     print(f"reading   {path.name}")
     wb = openpyxl.load_workbook(path, data_only=True)
+    print("finished reading workbook")
 
-    with psycopg.connect(args.dsn) as cx:
+    print(f"connecting to {args.dsn}...")
+    with psycopg.connect(args.dsn, connect_timeout=10,
+                         prepare_threshold=None) as cx:
+        print("connected to db!")
         loader = Loader(
             cx, wb, args.period,
             datetime.strptime(args.start, "%Y-%m-%d").date(),

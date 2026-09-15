@@ -2,6 +2,9 @@
 Live change events: Postgres LISTEN -> server-sent events -> the dashboard.
 
 One dedicated connection sits on the `dsr_change` channel (see db/triggers.sql).
+It dials LISTEN_DSN rather than the pooled DSN: LISTEN registers interest on a
+single backend, so it is silently useless through a transaction-mode pooler and
+needs the session-mode port. See the note in db.py.
 Whatever writes to the database - the dashboard, the bulk loader, tools/sql.py,
 an agent - the trigger fires, this listener wakes, and every open dashboard is
 told to refetch.
@@ -29,7 +32,7 @@ from typing import AsyncIterator
 
 import psycopg
 
-from .db import DSN
+from .db import LISTEN_DSN
 
 log = logging.getLogger("dsr.events")
 
@@ -47,11 +50,19 @@ POLL_SECONDS = 1.0
 # small queue and is dropped from the broadcast if it fills.
 QUEUE_SIZE = 32
 
+# What a workbook upload rewrites, and therefore what the dashboard must refetch
+# when one lands.
+WORKBOOK_TABLES = {
+    "lead", "booking", "test_drive", "allotment", "registration", "vehicle",
+    "target_daily_tracker", "target_channel_funnel",
+    "target_consultant_scorecard", "target_booking_commitment", "etl_run",
+}
+
 
 class ChangeBroker:
     """Fans database notifications out to any number of SSE subscribers."""
 
-    def __init__(self, dsn: str = DSN):
+    def __init__(self, dsn: str = LISTEN_DSN):
         self.dsn = dsn
         self._subscribers: set[asyncio.Queue] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -132,6 +143,26 @@ class ChangeBroker:
                         self._loop.call_soon_threadsafe(self._note, table)
 
     # -- coalescing, on the event loop --------------------------------
+
+    async def notify(self, kind: str, table: str, data: dict | None = None) -> None:
+        """
+        Announce a change made by this process, without waiting for the database.
+
+        A bulk load is the case that needs it: the loader writes inside one
+        transaction over the transaction pooler, so the trigger's NOTIFY may not
+        reach the listener at all. Telling the subscribers directly means an
+        upload refreshes every open dashboard even when LISTEN is unavailable.
+
+        `kind` and `data` describe the change for future use; the browser only
+        needs the table list, which is what the flush already sends.
+        """
+        tables = [table]
+        if kind == "workbook_reload":
+            # A workbook rewrites every fact table, so ask for a full refetch
+            # rather than naming the one row that recorded the run.
+            tables = sorted(WORKBOOK_TABLES)
+        for name in tables:
+            self._note(name)
 
     def notify_sync(self, table: str) -> None:
         """Trigger an immediate notification to subscribers from any thread."""

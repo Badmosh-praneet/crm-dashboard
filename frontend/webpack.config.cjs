@@ -3,7 +3,7 @@ const path = require('path');
 module.exports = {
   entry: './src/main.jsx',
   output: {
-    path: path.resolve(__dirname, '../public/assets'),
+    path: path.resolve(__dirname, '../app/static/assets'),
     filename: 'bundle.js',
     publicPath: '/assets/',
     clean: true,

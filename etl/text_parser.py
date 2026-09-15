@@ -20,7 +20,7 @@ from typing import Any
 import openpyxl
 import psycopg
 
-from app.db import DSN
+from app.db import DSN, connect as db_connect
 from etl import dimensions as dims
 from etl import normalize as nz
 from etl.load_dsr import Loader
@@ -184,7 +184,7 @@ def ingest_text_report(
     # 1. Multi-section DSR Text file
     if is_multi_section_dsr(text):
         wb = build_workbook_from_sections(text)
-        with psycopg.connect(DSN, autocommit=True) as cx:
+        with db_connect(autocommit=True) as cx:
             loader = Loader(cx, wb, period_label, period_start, period_end)
             counts = loader.run()
             return {
@@ -204,7 +204,7 @@ def ingest_text_report(
     data_rows = rows[1:]
     kind = detect_table_type(headers, table_type)
 
-    with psycopg.connect(DSN, autocommit=True) as cx:
+    with db_connect(autocommit=True) as cx:
         # Ensure period exists in dim_period
         p_row = cx.execute("""
             INSERT INTO dim_period (label, period_start, period_end)

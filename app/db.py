@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from typing import Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -22,6 +24,24 @@ if _raw_dsn.startswith("postgres://"):
 
 DSN = _raw_dsn or "postgresql://postgres:postgres@127.0.0.1:5432/elite_dsr"
 
+# Supabase exposes two pooler ports: 6543 pools per *transaction*, 5432 per
+# *session*. Transaction mode is right for the query workload - it is why the
+# pool can stay small - but it hands each transaction whatever backend is free,
+# which breaks anything that expects one backend to remember something:
+#
+#   * psycopg prepares a statement after prepare_threshold executions and then
+#     refers to it by name. The name only exists on the backend that created it,
+#     so the 6th execution fails with 'prepared statement "_pg3_0" does not
+#     exist' - and the poisoned connection keeps failing from the pool.
+#     prepare_threshold=None keeps every statement unnamed.
+#
+#   * LISTEN registers interest on one backend, so notifications never arrive.
+#     The change listener therefore dials LISTEN_DSN (session mode) instead.
+#
+# Both are silent failures: is_db_ready() goes false and every endpoint quietly
+# serves fallback.get_*() instead, which looks like a working dashboard.
+LISTEN_DSN = os.environ.get("LISTEN_DATABASE_URL") or DSN.replace(":6543/", ":5432/")
+
 # Every query in this app runs against the dsr schema, so the search path is set
 # once on connection rather than repeated in each statement.
 # min_size=0 ensures we do not block or fail on startup if the database is unconfigured.
@@ -30,11 +50,27 @@ pool = ConnectionPool(
     min_size=0,
     max_size=8,
     open=False,
-    kwargs={"row_factory": dict_row, "options": "-c search_path=dsr,public"},
+    kwargs={
+        "row_factory": dict_row,
+        "options": "-c search_path=dsr,public",
+        "prepare_threshold": None,
+    },
 )
 
 _db_ready: bool = False
 _last_check_time: float = 0.0
+
+
+def connect(dsn: str | None = None, **kwargs):
+    """
+    A direct, unpooled connection carrying the same settings as the pool.
+
+    The bulk loader wants one long-lived session rather than a pooled one, but
+    it needs the same pooler-safe defaults - see the note above prepare_threshold.
+    """
+    kwargs.setdefault("prepare_threshold", None)
+    kwargs.setdefault("options", "-c search_path=dsr,public")
+    return psycopg.connect(dsn or DSN, **kwargs)
 
 
 def has_database() -> bool:
@@ -57,13 +93,27 @@ def ensure_pool_open() -> None:
         log.warning("Could not open database pool: %s", exc)
 
 
+# How long a readiness answer is trusted before it is checked again. The failure
+# window is long so an unreachable database cannot hang every request; the
+# success window only has to be short enough to notice the database going away,
+# and the queries themselves fail over to fallback anyway if it does.
+READY_TTL = 5.0
+FAILED_TTL = 30.0
+
+
 def is_db_ready() -> bool:
-    """Fast check with 30s failure caching so requests never hang on unreachable DB."""
+    """Cached readiness check, so a request does not pay a round trip to ask."""
     global _db_ready, _last_check_time
     if not has_database():
         return False
     now = time.time()
-    if not _db_ready and (now - _last_check_time) < 30.0:
+    age = now - _last_check_time
+    # Every endpoint calls this before doing anything, and the database is a
+    # round trip away, so pinging each time doubled the latency of the whole
+    # dashboard.
+    if _db_ready and age < READY_TTL:
+        return True
+    if not _db_ready and age < FAILED_TTL:
         return False
     _last_check_time = now
     try:
@@ -80,6 +130,21 @@ def is_db_ready() -> bool:
 
 def check_db() -> bool:
     return is_db_ready()
+
+
+@contextmanager
+def session():
+    """
+    One pooled connection for an endpoint that runs several related queries.
+
+    Checking a connection out of the pool costs a round trip of its own, and the
+    database is far enough away (~1.2s) that an endpoint doing seven fetch_all
+    calls spends most of its time on checkout rather than on the queries.
+    Sharing one connection across the batch roughly halves that.
+    """
+    ensure_pool_open()
+    with pool.connection(timeout=20.0) as cx:
+        yield cx
 
 
 def fetch_all(sql: str, params: tuple = ()) -> list[dict[str, Any]]:

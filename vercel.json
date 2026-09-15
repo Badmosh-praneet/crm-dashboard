@@ -29,5 +29,16 @@
       "source": "/(.*)",
       "destination": "/api/index.py"
     }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)\\.(js|css|html)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
+      ]
+    }
   ]
 }

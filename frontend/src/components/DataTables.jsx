@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Search, FileSpreadsheet } from 'lucide-react';
-import { n0, money, dt } from '../api/client';
+import { n0, money, dt, pct } from '../api/client';
 
 export default function DataTables({ orderbook = [], sources = [], backorders = [] }) {
   const [tab, setTab] = useState('bookings');

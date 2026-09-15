@@ -3,3 +3,6 @@ psycopg[binary]>=3.2
 psycopg_pool>=3.2
 fastapi>=0.115
 uvicorn[standard]>=0.30
+google-api-python-client>=2.0.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.0.0

@@ -29,6 +29,16 @@
   /* Ordinal Blues for chart series */
   --o1: #c5dcfa;  --o2: #84b6f6;  --o3: #004fb6;  --o4: #003680;  --o5: #001f4d;
 
+  /* Chart palette. Validated with the data-viz palette checker against this
+     theme's real chart surface (#ffffff light / #15191e dark): categorical
+     slots clear the CVD + normal-vision separation floors, the ageing ramp is
+     single-hue, monotone, and its end nearest the surface clears 2:1.
+     --viz-3 sits at 2.54:1 on white, so any series using it is direct-labelled.
+     Do not re-step these by eye - re-run the checker. */
+  --viz-1: #004fb6;  --viz-2: #f26835;  --viz-3: #10b981;
+  --viz-a1: #84b6f6; --viz-a2: #3f83d6; --viz-a3: #004fb6;
+  --viz-a4: #003680; --viz-a5: #001f4d;
+
   --good: #10b981;
   --good-text: #047857;
   --warning: #f59e0b;
@@ -66,6 +76,11 @@
   --s3-light: rgba(52, 211, 153, 0.12);
 
   --o1: #0e375e;  --o2: #155592;  --o3: #38bdf8;  --o4: #7dd3fc;  --o5: #bae6fd;
+
+  /* Dark steps are selected for the dark surface, not flipped from light. */
+  --viz-1: #3987e5;  --viz-2: #d95926;  --viz-3: #199e70;
+  --viz-a1: #155592; --viz-a2: #2185c9; --viz-a3: #38bdf8;
+  --viz-a4: #7dd3fc; --viz-a5: #bae6fd;
   --good-text: #34d399;
 
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);

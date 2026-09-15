@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from './components/Header';
 import Way1ActionBar from './components/Way1ActionBar';
 import HeroMetric from './components/HeroMetric';
@@ -10,6 +10,8 @@ import DataTables from './components/DataTables';
 import EntryDrawer from './components/EntryDrawer';
 import ExcelUploadModal from './components/ExcelUploadModal';
 import ToastContainer from './components/ToastContainer';
+import Visualizations from './components/Visualizations';
+import Analytics from './components/Analytics';
 import { fetchDashboardData, activatePeriod } from './api/client';
 import { setupLiveEvents } from './api/liveEvents';
 
@@ -51,24 +53,40 @@ export default function App() {
     setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
   };
 
+  // Whether a load has ever succeeded, and whether one is in flight. Both are
+  // refs rather than state on purpose: loadData must keep a stable identity, or
+  // the effect below re-runs on every fetch.
+  const hasLoadedRef = useRef(false);
+  const inFlightRef = useRef(false);
+
   // Data fetching
   const loadData = useCallback(async (quiet = false) => {
+    // A change event, the heartbeat and a tab focus can all land together, and
+    // one pass is fifteen requests against a database a round trip away. Without
+    // this guard they queue up behind the browser's per-host connection limit
+    // until fetches start timing out.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     if (!quiet) setIsRefreshing(true);
     try {
       const res = await fetchDashboardData();
       setData(res);
+      hasLoadedRef.current = true;
       setError(null);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
-      if (!data) setError(err.message || 'Failed to connect to CRM API');
+      if (!hasLoadedRef.current) setError(err.message || 'Failed to connect to CRM API');
       addToast(`Refresh failed: ${err.message}`, { bad: true });
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
       setIsRefreshing(false);
     }
-  }, [data, addToast]);
+  }, [addToast]);
 
-  // Initial fetch and SSE event wiring
+  // Initial fetch and SSE event wiring. loadData is stable, so this runs once -
+  // when it also depended on `data` the effect re-ran after every fetch, which
+  // reloaded the dashboard in a loop and tore the event stream down with it.
   useEffect(() => {
     loadData();
 
@@ -162,11 +180,26 @@ export default function App() {
       <HeroMetric kpi={data?.kpi || {}} />
       <KpiTiles kpi={data?.kpi || {}} />
 
+      {/* Visualizations */}
+      <Visualizations sources={data?.sources || []} models={data?.models || []} />
+
       {/* Funnel & Leaderboard Grid */}
       <div className="grid-2">
         <SalesFunnel funnel={data?.funnel || {}} />
         <Leaderboard board={data?.board || []} />
       </div>
+
+      {/* Pace, ageing, conversion, backorders, attachments, data quality */}
+      <Analytics
+        orderbook={data?.orderbook || []}
+        commitments={data?.commitments || []}
+        ageing={data?.ageing || []}
+        backorders={data?.backorders || []}
+        scorecards={data?.scorecards || []}
+        attachments={data?.attachments || null}
+        dataQuality={data?.dataQuality || []}
+        kpi={data?.kpi || {}}
+      />
 
       {/* Models & Inventory Ageing */}
       <StockAndModels

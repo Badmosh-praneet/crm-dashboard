@@ -41,7 +41,10 @@ async def lifespan(app: FastAPI):
     try:
         pool.open()
         if not is_vercel and os.environ.get("DATABASE_URL"):
-            pool.wait(timeout=2.0)
+            # Deliberately not pool.wait(): on timeout it closes the pool, and a
+            # closed pool cannot be reopened, so one slow start would leave the
+            # app serving fallback data until it was restarted. The ping below
+            # warms a connection and is allowed to fail.
             is_db_ready()
     except Exception as exc:
         log.warning("Database connection pool not ready: %s", exc)
@@ -502,15 +505,35 @@ def agent_action_list():
 # Static dashboard
 # =====================================================================
 
+class RevalidatingStatic(StaticFiles):
+    """
+    Static files that must be revalidated rather than reused blind.
+
+    The front end is served from fixed paths (`assets/bundle.js` has no content
+    hash), and Starlette sends only ETag and Last-Modified. With no
+    Cache-Control at all a browser falls back to *heuristic* caching - it may
+    reuse the file for a while without asking - so a rebuilt dashboard kept
+    running the previous bundle until someone hard-reloaded.
+
+    `no-cache` does not mean "do not store": the browser still caches and still
+    gets a cheap 304 from the ETag. It only has to ask first.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
 if STATIC.exists():
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", RevalidatingStatic(directory=STATIC), name="static")
 
 
 @app.get("/", include_in_schema=False)
 def dashboard():
     index_file = STATIC / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
     return {"message": "Volkswagen Elite Motors CRM API is running."}
 
 

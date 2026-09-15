@@ -25,7 +25,8 @@ import psycopg
 from psycopg.errors import IntegrityError
 
 from . import fallback
-from .db import is_db_ready, fetch_all, pool, DSN, ensure_pool_open
+from .db import (is_db_ready, fetch_all, pool, DSN, ensure_pool_open,
+                 connect as db_connect, session)
 from .events import broker
 from etl.dimensions import activate_period
 from etl.load_dsr import Loader
@@ -208,39 +209,43 @@ def delete_entry(table: str, row_id: int):
 def entry_options():
     if is_db_ready():
         try:
-            return {
-                "consultants": [r["display_name"] for r in fetch_all(
-                    "SELECT display_name FROM dim_consultant WHERE is_active "
-                    "ORDER BY display_name")],
-                "sources": [r["name"] for r in fetch_all(
-                    "SELECT name FROM dim_lead_source ORDER BY name")],
-                "models": [r["name"] for r in fetch_all(
-                    "SELECT name FROM dim_model ORDER BY name")],
-                "variants": fetch_all(
-                    "SELECT m.name AS model, v.name AS variant, v.long_model_text "
-                    "FROM dim_variant v JOIN dim_model m USING (model_id) "
-                    "ORDER BY m.name, v.name"),
-                "colours": [r["name"] for r in fetch_all(
-                    "SELECT name FROM dim_colour ORDER BY name")],
-                "fulfilment_statuses": ["BOOKED", "NO_STOCK", "ALLOTED",
-                                        "RETAILED", "CANCELLED"],
-                "open_bookings": fetch_all("""
-                    SELECT b.booking_id, b.customer_name, m.name AS model,
-                           dv.name AS variant, c.display_name AS consultant
-                    FROM booking b
-                    LEFT JOIN dim_model m      ON m.model_id = b.model_id
-                    LEFT JOIN dim_variant dv   ON dv.variant_id = b.variant_id
-                    LEFT JOIN dim_consultant c ON c.consultant_id = b.consultant_id
-                    WHERE b.fulfilment_status IN ('BOOKED', 'NO_STOCK')
-                    ORDER BY b.booking_date DESC NULLS LAST
-                    LIMIT 200
-                """),
-                "free_chassis": fetch_all("""
-                    SELECT chassis_number, model, variant, colour, stock_aging_days
-                    FROM v_stock WHERE stock_status = 'FREESTOCK'
-                    ORDER BY stock_aging_days DESC NULLS LAST
-                """),
-            }
+            # Seven queries over one checked-out connection rather than seven:
+            # against a remote database the checkout costs more than the query.
+            with session() as cx:
+                q = lambda sql: cx.execute(sql).fetchall()
+                return {
+                    "consultants": [r["display_name"] for r in q(
+                        "SELECT display_name FROM dim_consultant WHERE is_active "
+                        "ORDER BY display_name")],
+                    "sources": [r["name"] for r in q(
+                        "SELECT name FROM dim_lead_source ORDER BY name")],
+                    "models": [r["name"] for r in q(
+                        "SELECT name FROM dim_model ORDER BY name")],
+                    "variants": q(
+                        "SELECT m.name AS model, v.name AS variant, v.long_model_text "
+                        "FROM dim_variant v JOIN dim_model m USING (model_id) "
+                        "ORDER BY m.name, v.name"),
+                    "colours": [r["name"] for r in q(
+                        "SELECT name FROM dim_colour ORDER BY name")],
+                    "fulfilment_statuses": ["BOOKED", "NO_STOCK", "ALLOTED",
+                                            "RETAILED", "CANCELLED"],
+                    "open_bookings": q("""
+                        SELECT b.booking_id, b.customer_name, m.name AS model,
+                               dv.name AS variant, c.display_name AS consultant
+                        FROM booking b
+                        LEFT JOIN dim_model m      ON m.model_id = b.model_id
+                        LEFT JOIN dim_variant dv   ON dv.variant_id = b.variant_id
+                        LEFT JOIN dim_consultant c ON c.consultant_id = b.consultant_id
+                        WHERE b.fulfilment_status IN ('BOOKED', 'NO_STOCK')
+                        ORDER BY b.booking_date DESC NULLS LAST
+                        LIMIT 200
+                    """),
+                    "free_chassis": q("""
+                        SELECT chassis_number, model, variant, colour, stock_aging_days
+                        FROM v_stock WHERE stock_status = 'FREESTOCK'
+                        ORDER BY stock_aging_days DESC NULLS LAST
+                    """),
+                }
         except Exception:
             pass
     return fallback.get_entry_options()
@@ -359,7 +364,7 @@ async def upload_dsr_workbook(
 
             if is_db_ready():
                 try:
-                    with psycopg.connect(DSN, autocommit=True) as cx:
+                    with db_connect(autocommit=True) as cx:
                         cx.execute("""
                             INSERT INTO etl_run (source_file, file_modified, finished_at, row_counts, notes)
                             VALUES (%s, now(), now(), %s, %s)
@@ -404,7 +409,7 @@ async def upload_dsr_workbook(
 
     if is_db_ready():
         try:
-            with psycopg.connect(DSN, autocommit=True) as cx:
+            with db_connect(autocommit=True) as cx:
                 loader = Loader(cx, wb, period_label, period_start, period_end)
                 counts = loader.run()
                 cx.execute("""

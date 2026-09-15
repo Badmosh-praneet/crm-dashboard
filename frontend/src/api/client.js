@@ -33,7 +33,8 @@ export async function fetchDashboardData() {
   try {
     const [
       kpi, funnel, board, sources, models, ageing, backorders,
-      periods, options, activity, orderbook
+      periods, options, activity, orderbook,
+      scorecards, commitments, attachments, dataQuality
     ] = await Promise.all([
       api("/api/kpi"),
       api("/api/funnel"),
@@ -45,7 +46,13 @@ export async function fetchDashboardData() {
       api("/api/periods"),
       api("/api/entry-options"),
       api("/api/recent-activity?limit=15"),
-      api("/api/bookings?limit=50"),
+      // The booking trend plots one point per day, so it needs the whole month,
+      // not the first page.
+      api("/api/bookings?limit=1000"),
+      api("/api/scorecards"),
+      api("/api/commitments"),
+      api("/api/attachments"),
+      api("/api/data-quality"),
     ]);
 
     // Enrich KPI with targets from funnel stages if not directly set
@@ -65,6 +72,7 @@ export async function fetchDashboardData() {
     return {
       kpi: enrichedKpi, funnel, board, sources, models, ageing, backorders,
       periods, options, activity, orderbook,
+      scorecards, commitments, attachments, dataQuality,
       isLive: true,
     };
   } catch (err) {
@@ -107,6 +115,10 @@ export async function fetchDashboardData() {
       options: { consultants: [], models: [], sources: [], colours: [], open_bookings: [], free_chassis: [] },
       activity: [],
       orderbook: [],
+      scorecards: [],
+      commitments: [],
+      attachments: null,
+      dataQuality: [],
       isLive: false,
     };
   }
