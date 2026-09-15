@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "webpack --config webpack.config.cjs",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
